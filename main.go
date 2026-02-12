@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/huh"
 )
@@ -118,7 +119,7 @@ Usage:
 
 Commands:
   run      Interactively select prompts and model, then run evals
-  models   Manage provider/model discovery and saved model IDs
+  models   Interactively browse and save models for reuse
   list     List all prompts in prompts.json
   add      Add a new prompt to prompts.json
   edit     Edit an existing prompt
@@ -128,22 +129,15 @@ Commands:
 Examples:
   high-evals run
   high-evals models
-  high-evals models save openrouter/glm5
+  high-evals models list
   high-evals models saved
   high-evals add
-  high-evals list
-  high-evals edit`)
+  high-evals list`)
 }
 
 func modelsCommand(args []string) {
 	if len(args) == 0 {
-		providersData, err := getProvidersData()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error fetching providers/models: %v\n", err)
-			os.Exit(1)
-		}
-		printProviders(providersData)
-		fmt.Println("\nUse 'high-evals models save <provider/model>' to store a model for reuse.")
+		interactiveModelsCommand()
 		return
 	}
 
@@ -152,11 +146,77 @@ func modelsCommand(args []string) {
 		saveModelsCommand(args[1:])
 	case "saved":
 		listSavedModelsCommand()
+	case "list":
+		providersData, err := getProvidersData()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching providers/models: %v\n", err)
+			os.Exit(1)
+		}
+		printProviders(providersData)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown models subcommand: %s\n", args[0])
-		fmt.Fprintln(os.Stderr, "Usage: high-evals models [save <provider/model>|saved]")
+		fmt.Fprintln(os.Stderr, "Usage: high-evals models [save <provider/model>|saved|list]")
 		os.Exit(1)
 	}
+}
+
+func interactiveModelsCommand() {
+	providersData, err := getProvidersData()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching providers/models: %v\n", err)
+		os.Exit(1)
+	}
+
+	allModels := flattenModelIDs(providersData)
+	if len(allModels) == 0 {
+		fmt.Fprintln(os.Stderr, "No models available.")
+		os.Exit(1)
+	}
+
+	selected, err := promptModelsToSave(allModels)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(selected) == 0 {
+		fmt.Println("No models selected.")
+		return
+	}
+
+	existing, err := loadSavedModels()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading saved models: %v\n", err)
+		os.Exit(1)
+	}
+
+	set := make(map[string]struct{}, len(existing))
+	for _, model := range existing {
+		set[model] = struct{}{}
+	}
+
+	added := 0
+	for _, model := range selected {
+		if _, exists := set[model]; exists {
+			continue
+		}
+		existing = append(existing, model)
+		set[model] = struct{}{}
+		added++
+	}
+
+	if added == 0 {
+		fmt.Printf("No new models added. Selected models already saved in %s.\n", savedModelsFile)
+		return
+	}
+
+	sort.Strings(existing)
+	if err := saveSavedModels(existing); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving models: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Saved %d model(s) to %s.\n", added, savedModelsFile)
 }
 
 func loadPrompts() (PromptJSON, error) {
@@ -611,23 +671,8 @@ func saveModelsCommand(args []string) {
 			os.Exit(1)
 		}
 
-		var selected []string
-		options := make([]huh.Option[string], len(allModels))
-		for i, model := range allModels {
-			options[i] = huh.NewOption(model, model)
-		}
-
-		form := huh.NewForm(
-			huh.NewGroup(
-				huh.NewMultiSelect[string]().
-					Title("Select model(s) to save").
-					Options(options...).
-					Value(&selected).
-					Filterable(true),
-			),
-		)
-
-		if err := form.Run(); err != nil {
+		selected, err := promptModelsToSave(allModels)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -680,6 +725,58 @@ func saveModelsCommand(args []string) {
 	}
 
 	fmt.Printf("Saved %d model(s) to %s.\n", added, savedModelsFile)
+}
+
+func promptModelsToSave(allModels []string) ([]string, error) {
+	searchQuery := ""
+
+	for {
+		inputForm := huh.NewForm(
+			huh.NewGroup(
+				huh.NewInput().
+					Title("Search models").
+					Description("Type part of provider/model (leave empty to show all models)").
+					Placeholder("e.g. openrouter/glm").
+					Value(&searchQuery),
+			),
+		)
+		if err := inputForm.Run(); err != nil {
+			return nil, err
+		}
+
+		filtered := filterModels(allModels, searchQuery)
+		if len(filtered) == 0 {
+			fmt.Fprintf(os.Stderr, "No models matched %q. Try another search.\n", searchQuery)
+			continue
+		}
+
+		searchLabel := strings.TrimSpace(searchQuery)
+		if searchLabel == "" {
+			searchLabel = "all models"
+		}
+
+		var selected []string
+		options := make([]huh.Option[string], len(filtered))
+		for i, model := range filtered {
+			options[i] = huh.NewOption(model, model)
+		}
+
+		selectForm := huh.NewForm(
+			huh.NewGroup(
+				huh.NewMultiSelect[string]().
+					Title("Select model(s) to save").
+					Description(fmt.Sprintf("Search: %s (%d/%d shown). Use space to select, enter to confirm.", searchLabel, len(filtered), len(allModels))).
+					Options(options...).
+					Value(&selected).
+					Filterable(false),
+			),
+		)
+		if err := selectForm.Run(); err != nil {
+			return nil, err
+		}
+
+		return selected, nil
+	}
 }
 
 func listSavedModelsCommand() {
@@ -739,6 +836,141 @@ func flattenModelIDs(data ProvidersData) []string {
 	}
 	sort.Strings(models)
 	return models
+}
+
+func filterModels(models []string, query string) []string {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return models
+	}
+
+	lowerQuery := strings.ToLower(trimmed)
+	normalizedQuery := normalizeForSearch(trimmed)
+	queryTokens := splitSearchTokens(trimmed)
+
+	type modelScore struct {
+		model string
+		score int
+	}
+
+	scored := make([]modelScore, 0, len(models))
+	for _, model := range models {
+		score, ok := scoreModelMatch(model, lowerQuery, normalizedQuery, queryTokens)
+		if ok {
+			scored = append(scored, modelScore{model: model, score: score})
+		}
+	}
+
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].score == scored[j].score {
+			return scored[i].model < scored[j].model
+		}
+		return scored[i].score > scored[j].score
+	})
+
+	filtered := make([]string, len(scored))
+	for i, match := range scored {
+		filtered[i] = match.model
+	}
+
+	return filtered
+}
+
+func scoreModelMatch(model, lowerQuery, normalizedQuery string, queryTokens []string) (int, bool) {
+	lowerModel := strings.ToLower(model)
+	normalizedModel := normalizeForSearch(model)
+	score := 0
+	matched := false
+
+	if lowerQuery != "" && strings.Contains(lowerModel, lowerQuery) {
+		score += 140
+		matched = true
+	}
+
+	if normalizedQuery != "" {
+		if strings.Contains(normalizedModel, normalizedQuery) {
+			score += 120
+			matched = true
+		}
+
+		if strings.HasPrefix(normalizedModel, normalizedQuery) {
+			score += 30
+		}
+
+		if isSubsequence(normalizedQuery, normalizedModel) {
+			score += 50
+			matched = true
+		}
+	}
+
+	tokenHits := 0
+	tokenScore := 0
+	searchPos := 0
+	ordered := true
+
+	for _, token := range queryTokens {
+		if strings.Contains(lowerModel, token) {
+			tokenHits++
+			tokenScore += 20
+		}
+
+		if ordered {
+			next := strings.Index(lowerModel[searchPos:], token)
+			if next == -1 {
+				ordered = false
+			} else {
+				searchPos += next + len(token)
+			}
+		}
+	}
+
+	if tokenHits > 0 {
+		score += tokenScore
+		matched = true
+		if tokenHits == len(queryTokens) {
+			score += 40
+			if ordered && len(queryTokens) > 1 {
+				score += 20
+			}
+		}
+	}
+
+	return score, matched
+}
+
+func normalizeForSearch(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func splitSearchTokens(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !(unicode.IsLetter(r) || unicode.IsDigit(r))
+	})
+}
+
+func isSubsequence(query, target string) bool {
+	if query == "" {
+		return true
+	}
+
+	queryRunes := []rune(query)
+	q := 0
+	for _, r := range target {
+		if q < len(queryRunes) && queryRunes[q] == r {
+			q++
+			if q == len(queryRunes) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isKnownModel(data ProvidersData, fullModelID string) bool {
