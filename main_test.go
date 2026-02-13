@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestFilterModelsMatchesHyphenWithSpaceQuery(t *testing.T) {
 	models := []string{
@@ -50,5 +53,83 @@ func TestFilterModelsSubsequenceQuery(t *testing.T) {
 
 	if filtered[0] != "openrouter/glm-5" {
 		t.Fatalf("expected top match to be openrouter/glm-5, got %q", filtered[0])
+	}
+}
+
+func TestPinSavedModelsMovesSavedToFront(t *testing.T) {
+	models := []string{
+		"openrouter/gpt-5",
+		"openrouter/glm-5",
+		"anthropic/claude-sonnet-4",
+	}
+	saved := map[string]struct{}{
+		"openrouter/glm-5": {},
+	}
+
+	pinned := pinSavedModels(models, saved)
+
+	if len(pinned) != len(models) {
+		t.Fatalf("expected %d models, got %d", len(models), len(pinned))
+	}
+
+	if pinned[0] != "openrouter/glm-5" {
+		t.Fatalf("expected first model to be pinned saved model, got %q", pinned[0])
+	}
+}
+
+func TestPinSavedModelIDsMovesSavedToFront(t *testing.T) {
+	modelIDs := []string{"gpt-5", "glm-5", "claude-sonnet-4"}
+	saved := map[string]struct{}{
+		"openrouter/glm-5": {},
+	}
+
+	pinned := pinSavedModelIDs("openrouter", modelIDs, saved)
+	if pinned[0] != "glm-5" {
+		t.Fatalf("expected first modelID to be pinned saved model, got %q", pinned[0])
+	}
+}
+
+func TestIsTransientEvalError(t *testing.T) {
+	cases := []struct {
+		errMsg     string
+		transient  bool
+	}{
+		{"no agent activity for 180s", true},
+		{"event stream error: bufio.Scanner: token too long", true},
+		{"agent did not reach idle state", true},
+		{"Failed to send prompt: HTTP 401", false},
+		{"", false},
+	}
+
+	for _, tc := range cases {
+		got := isTransientEvalError(tc.errMsg)
+		if got != tc.transient {
+			t.Fatalf("isTransientEvalError(%q) = %v, want %v", tc.errMsg, got, tc.transient)
+		}
+	}
+}
+
+func TestApplyRuntimeOptions(t *testing.T) {
+	origTimeout := inactivityTimeout
+	origRetries := transientRetries
+	t.Cleanup(func() {
+		inactivityTimeout = origTimeout
+		transientRetries = origRetries
+	})
+
+	applyRuntimeOptions(240, 3)
+	if inactivityTimeout != 240*time.Second {
+		t.Fatalf("expected inactivity timeout 240s, got %s", inactivityTimeout)
+	}
+	if transientRetries != 3 {
+		t.Fatalf("expected retries 3, got %d", transientRetries)
+	}
+
+	applyRuntimeOptions(0, -1)
+	if inactivityTimeout != defaultInactivityTimeout {
+		t.Fatalf("expected fallback inactivity timeout %s, got %s", defaultInactivityTimeout, inactivityTimeout)
+	}
+	if transientRetries != defaultTransientRetries {
+		t.Fatalf("expected fallback retries %d, got %d", defaultTransientRetries, transientRetries)
 	}
 }

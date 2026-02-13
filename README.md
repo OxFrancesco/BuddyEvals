@@ -24,12 +24,19 @@ Interactively select prompts and a model, then run evaluations.
 
 ```bash
 high-evals run
+
+# Optional resilience tuning
+high-evals run --inactivity-timeout 240 --retries 2
 ```
 
 Prompts you to:
 1. Select one or more prompts (multi-select, filterable)
 2. Enter a model ID (format: `provider/model`, e.g., `openrouter/glm5`)
 3. Choose execution mode: parallel (all at once) or sequential
+
+CLI flags:
+- `--inactivity-timeout <seconds>`: fail an eval only after this much silence (default `180`)
+- `--retries <count>`: retry transient failures like idle timeout or event-stream parsing errors (default `1`)
 
 Results are saved in `evals/` folders with timestamps.
 
@@ -38,11 +45,14 @@ Results are saved in `evals/` folders with timestamps.
 Interactively browse and save models for reuse.
 
 ```bash
-# Interactive model browser (filterable, multi-select)
+# Interactive model browser (search + multi-select)
 high-evals models
 
 # List all providers and models (non-interactive)
 high-evals models list
+
+# Check whether a model is currently available from opencode providers
+high-evals models check openrouter/glm-5
 
 # List saved models
 high-evals models saved
@@ -50,6 +60,7 @@ high-evals models saved
 
 When run interactively:
 - Enter a search query first (blank shows all models)
+- Saved models are pinned first and marked as `[saved]`
 - The selector shows your current search query and match count
 - Use `space` to select/deselect
 - Use `enter` to confirm and save
