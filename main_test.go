@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -91,8 +92,8 @@ func TestPinSavedModelIDsMovesSavedToFront(t *testing.T) {
 
 func TestIsTransientEvalError(t *testing.T) {
 	cases := []struct {
-		errMsg     string
-		transient  bool
+		errMsg    string
+		transient bool
 	}{
 		{"no agent activity for 180s", true},
 		{"event stream error: bufio.Scanner: token too long", true},
@@ -131,5 +132,35 @@ func TestApplyRuntimeOptions(t *testing.T) {
 	}
 	if transientRetries != defaultTransientRetries {
 		t.Fatalf("expected fallback retries %d, got %d", defaultTransientRetries, transientRetries)
+	}
+}
+
+func TestSanitizeModelForFolder(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"openrouter/z-ai/glm-5", "openrouter-z-ai-glm-5"},
+		{"glm-5", "openrouter-glm-5"},
+		{" OpenRouter/Model:Name ", "openrouter-model-name"},
+		{"", "unknown-model"},
+	}
+
+	for _, tc := range cases {
+		got := sanitizeModelForFolder(tc.input)
+		if got != tc.want {
+			t.Fatalf("sanitizeModelForFolder(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestCreateTimestampFolderIncludesModel(t *testing.T) {
+	folder := createTimestampFolder(3, "openrouter/z-ai/glm-5")
+
+	if !strings.HasPrefix(folder, "evals/") {
+		t.Fatalf("expected folder to start with evals/, got %q", folder)
+	}
+	if !strings.Contains(folder, "_3_openrouter-z-ai-glm-5") {
+		t.Fatalf("expected folder to include index and sanitized model, got %q", folder)
 	}
 }

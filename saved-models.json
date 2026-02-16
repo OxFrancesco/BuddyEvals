@@ -1,1 +1,5 @@
-["opencode/kimi-k2.5-free", "openrouter/z-ai/glm-5"]
+[
+  "opencode/kimi-k2.5-free",
+  "opencode/minimax-m2.5-free",
+  "openrouter/z-ai/glm-5"
+]

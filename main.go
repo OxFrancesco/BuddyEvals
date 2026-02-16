@@ -1404,11 +1404,52 @@ func parseModel(modelStr string) (string, string) {
 	return "openrouter", modelStr
 }
 
-func createTimestampFolder(index int) string {
+func sanitizeModelForFolder(model string) string {
+	model = strings.ToLower(normalizeModelID(strings.TrimSpace(model)))
+	if model == "" {
+		return "unknown-model"
+	}
+
+	var b strings.Builder
+	b.Grow(len(model))
+	prevDash := false
+
+	for _, r := range model {
+		isASCIIAlpha := r >= 'a' && r <= 'z'
+		isASCIIDigit := r >= '0' && r <= '9'
+		switch {
+		case isASCIIAlpha || isASCIIDigit || r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+			prevDash = false
+		default:
+			if !prevDash {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+
+	sanitized := strings.Trim(b.String(), "-_.")
+	if sanitized == "" {
+		return "unknown-model"
+	}
+
+	const maxLen = 64
+	if len(sanitized) > maxLen {
+		sanitized = strings.TrimRight(sanitized[:maxLen], "-_.")
+		if sanitized == "" {
+			return "unknown-model"
+		}
+	}
+
+	return sanitized
+}
+
+func createTimestampFolder(index int, model string) string {
 	now := time.Now()
-	return fmt.Sprintf("evals/%d-%02d-%02d_%02d-%02d-%02d_%d",
+	return fmt.Sprintf("evals/%d-%02d-%02d_%02d-%02d-%02d_%d_%s",
 		now.Year(), now.Month(), now.Day(),
-		now.Hour(), now.Minute(), now.Second(), index)
+		now.Hour(), now.Minute(), now.Second(), index, sanitizeModelForFolder(model))
 }
 
 func setupEvalFolder(folderPath, prompt string) error {
@@ -1570,7 +1611,7 @@ func runAgent(prompt string, index int, modelStr string, existingFolder string) 
 
 	folderPath := existingFolder
 	if folderPath == "" {
-		folderPath = createTimestampFolder(index)
+		folderPath = createTimestampFolder(index, modelStr)
 	}
 
 	fmt.Printf("[%d] Starting eval in %s\n", index, folderPath)
