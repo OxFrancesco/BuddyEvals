@@ -155,12 +155,21 @@ func TestSanitizeModelForFolder(t *testing.T) {
 }
 
 func TestCreateTimestampFolderIncludesModel(t *testing.T) {
-	folder := createTimestampFolder(3, "openrouter/z-ai/glm-5")
+	folder := createTimestampFolder(3, 12, "openrouter/z-ai/glm-5")
 
 	if !strings.HasPrefix(folder, "evals/") {
 		t.Fatalf("expected folder to start with evals/, got %q", folder)
 	}
-	if !strings.Contains(folder, "_3_openrouter-z-ai-glm-5") {
-		t.Fatalf("expected folder to include index and sanitized model, got %q", folder)
+	if !strings.Contains(folder, "_p12_3_openrouter-z-ai-glm-5") {
+		t.Fatalf("expected folder to include prompt number, index, and sanitized model, got %q", folder)
+	}
+}
+
+func TestParsePromptNumberFromFolder(t *testing.T) {
+	if got := parsePromptNumberFromFolder("2026-02-16_09-35-43_p7_3_openrouter-z-ai-glm-5"); got != 7 {
+		t.Fatalf("expected prompt number 7, got %d", got)
+	}
+	if got := parsePromptNumberFromFolder("2026-02-16_09-35-43_3_openrouter-z-ai-glm-5"); got != 0 {
+		t.Fatalf("expected 0 for folder without prompt marker, got %d", got)
 	}
 }

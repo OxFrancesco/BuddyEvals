@@ -7,7 +7,7 @@
 - You store reusable prompts in `prompts.json`.
 - You browse/check/save model IDs from `opencode`.
 - You run evals in `parallel` or `sequential` mode.
-- Every run is persisted under `evals/<timestamp>_<index>_<model>/` with:
+- Every run is persisted under `evals/<timestamp>_p<prompt-number>_<index>_<model>/` with:
   - `prompt.txt`
   - `result.json`
   - local `package.json` scaffold
@@ -21,6 +21,12 @@ go build -o high-evals
 ```
 
 This opens the interactive home menu (`Run evals`, `Resume evals`, `Manage models`, prompt CRUD, `Exit`).
+
+Open the local eval dashboard:
+
+```bash
+bun run evals:dashboard
+```
 
 ## Technical Analysis
 
@@ -194,6 +200,7 @@ Saved models are pinned to the top after filtering.
 ```json
 {
   "prompt": "Create X...",
+  "prompt_number": 3,
   "model": "openrouter/z-ai/glm-5",
   "success": true,
   "duration_seconds": 73,

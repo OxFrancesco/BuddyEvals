@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
 )
 
@@ -25,6 +28,7 @@ const (
 	defaultTransientRetries  = 1
 	eventScannerMaxTokenSize = 8 * 1024 * 1024
 	basePort                 = 4096
+	ocCleanupPortScanCount   = 256
 	promptsFile              = "prompts.json"
 	savedModelsFile          = "saved-models.json"
 )
@@ -32,14 +36,36 @@ const (
 var (
 	inactivityTimeout = defaultInactivityTimeout
 	transientRetries  = defaultTransientRetries
+	promptNumberRE    = regexp.MustCompile(`(?:^|_)p(\d+)(?:_|$)`)
 )
 
+func newEscBackForm(groups ...*huh.Group) *huh.Form {
+	keymap := huh.NewDefaultKeyMap()
+	keymap.Quit = key.NewBinding(
+		key.WithKeys("esc", "ctrl+c"),
+		key.WithHelp("esc", "back"),
+	)
+	return huh.NewForm(groups...).WithKeyMap(keymap)
+}
+
+func runFormWithBack(form *huh.Form) (aborted bool, err error) {
+	err = form.Run()
+	if err == nil {
+		return false, nil
+	}
+	if errors.Is(err, huh.ErrUserAborted) {
+		return true, nil
+	}
+	return false, err
+}
+
 type EvalResult struct {
-	Prompt   string
-	Folder   string
-	Success  bool
-	Error    string
-	Duration time.Duration
+	Prompt       string
+	PromptNumber int
+	Folder       string
+	Success      bool
+	Error        string
+	Duration     time.Duration
 }
 
 type PromptJSON []string
@@ -71,18 +97,21 @@ type PromptRequest struct {
 }
 
 type EvalResultFile struct {
-	Prompt          string `json:"prompt"`
-	Model           string `json:"model"`
-	Success         bool   `json:"success"`
-	Error           string `json:"error,omitempty"`
-	DurationSeconds int    `json:"duration_seconds"`
-	CompletedAt     string `json:"completed_at"`
+	Prompt          string  `json:"prompt"`
+	PromptNumber    int     `json:"prompt_number,omitempty"`
+	Model           string  `json:"model"`
+	Success         bool    `json:"success"`
+	Error           string  `json:"error,omitempty"`
+	DurationSeconds int     `json:"duration_seconds"`
+	CompletedAt     string  `json:"completed_at"`
+	CostUSD         float64 `json:"cost_usd,omitempty"`
 }
 
 type EvalFolder struct {
-	Path   string
-	Prompt string
-	Result *EvalResultFile
+	Path         string
+	Prompt       string
+	PromptNumber int
+	Result       *EvalResultFile
 }
 
 type Provider struct {
@@ -102,6 +131,12 @@ type ProvidersResponse struct {
 	Default   map[string]string `json:"default"`
 }
 
+type listeningProcess struct {
+	Command string
+	PID     int
+	Port    int
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		interactiveMenu()
@@ -117,6 +152,8 @@ func main() {
 		resumeCommand()
 	case "models":
 		modelsCommand(os.Args[2:])
+	case "oc":
+		ocCommand(os.Args[2:])
 	case "list":
 		listCommand()
 	case "add":
@@ -153,7 +190,7 @@ func interactiveMenu() {
 			savedCount = len(saved)
 		}
 
-		form := huh.NewForm(
+		form := newEscBackForm(
 			huh.NewGroup(
 				huh.NewSelect[string]().
 					Title("High-Evals").
@@ -161,6 +198,7 @@ func interactiveMenu() {
 					Options(
 						huh.NewOption("Run evals        select prompts and model, then run", "run"),
 						huh.NewOption("Resume evals     re-run previous evals from evals/", "resume"),
+						huh.NewOption("OC cleanup       stop stale opencode sessions", "oc-cleanup"),
 						huh.NewOption("Manage models    browse, search and save models", "models"),
 						huh.NewOption("List prompts     show all prompts in prompts.json", "list"),
 						huh.NewOption("Add prompt       create a new prompt", "add"),
@@ -172,7 +210,12 @@ func interactiveMenu() {
 			),
 		)
 
-		if err := form.Run(); err != nil {
+		aborted, err := runFormWithBack(form)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return
+		}
+		if aborted {
 			return
 		}
 
@@ -187,6 +230,8 @@ func interactiveMenu() {
 			runCommand()
 		case "resume":
 			resumeCommand()
+		case "oc-cleanup":
+			ocCleanupCommand()
 		case "models":
 			interactiveModelsCommand()
 		case "list":
@@ -212,6 +257,7 @@ Usage:
 Commands:
   run      Interactively select prompts and model, then run evals
   resume   Resume or re-run previous evals from the evals/ folder
+  oc       OpenCode utilities (cleanup stale local sessions)
   models   Interactively browse and save models for reuse
   list     List all prompts in prompts.json
   add      Add a new prompt to prompts.json
@@ -222,12 +268,236 @@ Commands:
 Examples:
   high-evals run
   high-evals resume
+  high-evals oc cleanup
   high-evals models
   high-evals models list
   high-evals models check openrouter/glm-5
   high-evals models saved
   high-evals add
-  high-evals list`)
+  high-evals list
+
+Interactive shortcuts:
+  Esc      Go back/cancel current screen
+  Ctrl+C   Quit`)
+}
+
+func ocCommand(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: high-evals oc cleanup")
+		os.Exit(1)
+	}
+
+	switch args[0] {
+	case "cleanup":
+		ocCleanupCommand()
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown oc subcommand: %s\n", args[0])
+		fmt.Fprintln(os.Stderr, "Usage: high-evals oc cleanup")
+		os.Exit(1)
+	}
+}
+
+func ocCleanupCommand() {
+	minPort := basePort
+	maxPort := basePort + ocCleanupPortScanCount - 1
+
+	procs, err := listListeningOpencodeProcesses(minPort, maxPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error scanning local opencode sessions: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(procs) == 0 {
+		fmt.Printf("No stale opencode sessions found on ports %d-%d.\n", minPort, maxPort)
+		return
+	}
+
+	portsByPID := make(map[int][]int)
+	commandByPID := make(map[int]string)
+	for _, p := range procs {
+		portsByPID[p.PID] = append(portsByPID[p.PID], p.Port)
+		commandByPID[p.PID] = p.Command
+	}
+
+	pids := make([]int, 0, len(portsByPID))
+	for pid := range portsByPID {
+		pids = append(pids, pid)
+	}
+	sort.Ints(pids)
+
+	fmt.Printf("Found %d opencode session process(es) to clean up.\n", len(pids))
+
+	cleaned := 0
+	failed := 0
+	for _, pid := range pids {
+		ports := portsByPID[pid]
+		sort.Ints(ports)
+		if err := terminateProcess(pid, ports); err != nil {
+			fmt.Printf("✗ PID %d (%s) on ports %s: %v\n", pid, commandByPID[pid], formatPorts(ports), err)
+			failed++
+			continue
+		}
+		fmt.Printf("✓ Stopped PID %d (%s) on ports %s\n", pid, commandByPID[pid], formatPorts(ports))
+		cleaned++
+	}
+
+	fmt.Printf("Cleanup complete: %d stopped, %d failed.\n", cleaned, failed)
+	if failed > 0 {
+		os.Exit(1)
+	}
+}
+
+func listListeningOpencodeProcesses(minPort, maxPort int) ([]listeningProcess, error) {
+	output, err := exec.Command("lsof", "-nP", "-iTCP", "-sTCP:LISTEN").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("running lsof: %w (%s)", err, strings.TrimSpace(string(output)))
+	}
+
+	lineRE := regexp.MustCompile(`^(\S+)\s+(\d+)\s+.*TCP .*:(\d+) \(LISTEN\)$`)
+	lines := strings.Split(string(output), "\n")
+	procs := make([]listeningProcess, 0)
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "COMMAND ") {
+			continue
+		}
+
+		m := lineRE.FindStringSubmatch(line)
+		if len(m) != 4 {
+			continue
+		}
+
+		command := strings.ToLower(m[1])
+		if !strings.Contains(command, "opencode") {
+			continue
+		}
+
+		pid, err := strconv.Atoi(m[2])
+		if err != nil || pid <= 0 {
+			continue
+		}
+
+		port, err := strconv.Atoi(m[3])
+		if err != nil {
+			continue
+		}
+		if port < minPort || port > maxPort {
+			continue
+		}
+
+		procs = append(procs, listeningProcess{
+			Command: m[1],
+			PID:     pid,
+			Port:    port,
+		})
+	}
+
+	return procs, nil
+}
+
+func terminateProcess(pid int, ports []int) error {
+	_ = terminateSinglePID(pid)
+	if waitForPortsClosed(ports, 2*time.Second) {
+		return nil
+	}
+
+	parentPID, err := getParentPID(pid)
+	if err == nil && parentPID > 1 {
+		parentCmd, cmdErr := getProcessCommand(parentPID)
+		if cmdErr == nil && strings.Contains(strings.ToLower(parentCmd), "high-evals") {
+			_ = terminateSinglePID(parentPID)
+			if waitForPortsClosed(ports, 2*time.Second) {
+				return nil
+			}
+		}
+	}
+
+	return errors.New("session ports still listening after termination attempts")
+}
+
+func terminateSinglePID(pid int) error {
+	pidStr := strconv.Itoa(pid)
+	_ = exec.Command("kill", "-TERM", pidStr).Run()
+
+	deadline := time.Now().Add(1200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if !isProcessAlive(pid) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	_ = exec.Command("kill", "-KILL", pidStr).Run()
+	time.Sleep(150 * time.Millisecond)
+	return nil
+}
+
+func isProcessAlive(pid int) bool {
+	return exec.Command("kill", "-0", strconv.Itoa(pid)).Run() == nil
+}
+
+func getParentPID(pid int) (int, error) {
+	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "ppid=").CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("reading parent PID for %d: %w (%s)", pid, err, strings.TrimSpace(string(output)))
+	}
+	parentStr := strings.TrimSpace(string(output))
+	if parentStr == "" {
+		return 0, errors.New("empty parent PID")
+	}
+	parentPID, err := strconv.Atoi(parentStr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid parent PID %q", parentStr)
+	}
+	return parentPID, nil
+}
+
+func getProcessCommand(pid int) (string, error) {
+	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("reading command for %d: %w (%s)", pid, err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func waitForPortsClosed(ports []int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !anyPortListening(ports) {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return !anyPortListening(ports)
+}
+
+func anyPortListening(ports []int) bool {
+	for _, port := range ports {
+		if isPortListening(port) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPortListening(port int) bool {
+	output, err := exec.Command("lsof", "-nP", fmt.Sprintf("-iTCP:%d", port), "-sTCP:LISTEN", "-t").CombinedOutput()
+	if err != nil {
+		return strings.TrimSpace(string(output)) != ""
+	}
+	return strings.TrimSpace(string(output)) != ""
+}
+
+func formatPorts(ports []int) string {
+	if len(ports) == 0 {
+		return "-"
+	}
+	parts := make([]string, len(ports))
+	for i, p := range ports {
+		parts[i] = strconv.Itoa(p)
+	}
+	return strings.Join(parts, ",")
 }
 
 func modelsCommand(args []string) {
@@ -277,6 +547,9 @@ func interactiveModelsCommand() {
 
 	selected, err := promptModelsToSave(allModels)
 	if err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			return
+		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -376,7 +649,7 @@ func listCommand() {
 func addCommand() {
 	var newPrompt string
 
-	form := huh.NewForm(
+	form := newEscBackForm(
 		huh.NewGroup(
 			huh.NewText().
 				Title("Enter the new prompt").
@@ -386,9 +659,13 @@ func addCommand() {
 		),
 	)
 
-	if err := form.Run(); err != nil {
+	aborted, err := runFormWithBack(form)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+	if aborted {
+		return
 	}
 
 	newPrompt = strings.TrimSpace(newPrompt)
@@ -435,7 +712,7 @@ func editCommand() {
 		options[i] = huh.NewOption(fmt.Sprintf("%d. %s", i+1, preview), i)
 	}
 
-	selectForm := huh.NewForm(
+	selectForm := newEscBackForm(
 		huh.NewGroup(
 			huh.NewSelect[int]().
 				Title("Select a prompt to edit").
@@ -444,14 +721,18 @@ func editCommand() {
 		),
 	)
 
-	if err := selectForm.Run(); err != nil {
+	aborted, err := runFormWithBack(selectForm)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+	if aborted {
+		return
 	}
 
 	editedPrompt := prompts[selectedIdx]
 
-	editForm := huh.NewForm(
+	editForm := newEscBackForm(
 		huh.NewGroup(
 			huh.NewText().
 				Title("Edit the prompt").
@@ -460,9 +741,13 @@ func editCommand() {
 		),
 	)
 
-	if err := editForm.Run(); err != nil {
+	aborted, err = runFormWithBack(editForm)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+	if aborted {
+		return
 	}
 
 	editedPrompt = strings.TrimSpace(editedPrompt)
@@ -503,7 +788,7 @@ func removeCommand() {
 		options[i] = huh.NewOption(fmt.Sprintf("%d. %s", i+1, preview), i)
 	}
 
-	form := huh.NewForm(
+	form := newEscBackForm(
 		huh.NewGroup(
 			huh.NewSelect[int]().
 				Title("Select a prompt to remove").
@@ -512,13 +797,17 @@ func removeCommand() {
 		),
 	)
 
-	if err := form.Run(); err != nil {
+	aborted, err := runFormWithBack(form)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	if aborted {
+		return
+	}
 
 	var confirmRemove bool
-	confirmForm := huh.NewForm(
+	confirmForm := newEscBackForm(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title(fmt.Sprintf("Remove prompt #%d?", selectedIdx+1)).
@@ -526,9 +815,13 @@ func removeCommand() {
 		),
 	)
 
-	if err := confirmForm.Run(); err != nil {
+	aborted, err = runFormWithBack(confirmForm)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+	if aborted {
+		return
 	}
 
 	if !confirmRemove {
@@ -598,7 +891,7 @@ func runCommand() {
 			promptOptions[i] = huh.NewOption(fmt.Sprintf("%d. %s", i+1, preview), i)
 		}
 
-		form := huh.NewForm(
+		form := newEscBackForm(
 			huh.NewGroup(
 				huh.NewMultiSelect[int]().
 					Title("Select prompts to run").
@@ -617,9 +910,13 @@ func runCommand() {
 			),
 		)
 
-		if err := form.Run(); err != nil {
+		aborted, err := runFormWithBack(form)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
+		}
+		if aborted {
+			return
 		}
 
 		if len(selectedIndices) == 0 {
@@ -627,7 +924,11 @@ func runCommand() {
 			return
 		}
 
-		modelStr = promptModelSelector("Select or type a model ID")
+		var modelSelectionAborted bool
+		modelStr, modelSelectionAborted = promptModelSelector("Select or type a model ID")
+		if modelSelectionAborted {
+			return
+		}
 		if modelStr == "" {
 			modelStr = "opencode/kimi-k2.5-free"
 		}
@@ -635,7 +936,10 @@ func runCommand() {
 
 	tasks := make([]EvalTask, len(selectedIndices))
 	for i, idx := range selectedIndices {
-		tasks[i] = EvalTask{Prompt: prompts[idx]}
+		tasks[i] = EvalTask{
+			Prompt:       prompts[idx],
+			PromptNumber: idx + 1,
+		}
 	}
 
 	fmt.Printf("\nStarting %d eval(s) with model: %s\n", len(tasks), modelStr)
@@ -712,7 +1016,12 @@ func resumeCommand() {
 			preview = preview[:47] + "..."
 		}
 
-		label := fmt.Sprintf("%s %s — %s%s", status, filepath.Base(ef.Path), preview, extra)
+		promptTag := "p?"
+		if ef.PromptNumber > 0 {
+			promptTag = fmt.Sprintf("p%d", ef.PromptNumber)
+		}
+
+		label := fmt.Sprintf("%s [%s] %s — %s%s", status, promptTag, filepath.Base(ef.Path), preview, extra)
 		options[i] = huh.NewOption(label, i)
 	}
 
@@ -720,7 +1029,7 @@ func resumeCommand() {
 	var modelStr string
 	var runMode string
 
-	form := huh.NewForm(
+	form := newEscBackForm(
 		huh.NewGroup(
 			huh.NewMultiSelect[int]().
 				Title("Select evals to resume").
@@ -740,9 +1049,13 @@ func resumeCommand() {
 		),
 	)
 
-	if err := form.Run(); err != nil {
+	aborted, err := runFormWithBack(form)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+	if aborted {
+		return
 	}
 
 	if len(selectedIndices) == 0 {
@@ -750,15 +1063,20 @@ func resumeCommand() {
 		return
 	}
 
-	modelStr = promptModelSelector("Select a model, or leave empty to re-use original")
+	var modelSelectionAborted bool
+	modelStr, modelSelectionAborted = promptModelSelector("Select a model, or leave empty to re-use original")
+	if modelSelectionAborted {
+		return
+	}
 	// modelStr may be empty — handled below per-eval
 
 	tasks := make([]EvalTask, len(selectedIndices))
 	for i, idx := range selectedIndices {
 		ef := folders[idx]
 		tasks[i] = EvalTask{
-			Prompt: ef.Prompt,
-			Folder: ef.Path,
+			Prompt:       ef.Prompt,
+			PromptNumber: ef.PromptNumber,
+			Folder:       ef.Path,
 		}
 
 		if modelStr == "" && ef.Result != nil && ef.Result.Model != "" {
@@ -1000,6 +1318,9 @@ func saveModelsCommand(args []string) {
 
 		selected, err := promptModelsToSave(allModels)
 		if err != nil {
+			if errors.Is(err, huh.ErrUserAborted) {
+				return
+			}
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -1062,7 +1383,7 @@ func promptModelsToSave(allModels []string) ([]string, error) {
 	}
 
 	for {
-		inputForm := huh.NewForm(
+		inputForm := newEscBackForm(
 			huh.NewGroup(
 				huh.NewInput().
 					Title("Search models").
@@ -1071,8 +1392,12 @@ func promptModelsToSave(allModels []string) ([]string, error) {
 					Value(&searchQuery),
 			),
 		)
-		if err := inputForm.Run(); err != nil {
+		aborted, err := runFormWithBack(inputForm)
+		if err != nil {
 			return nil, err
+		}
+		if aborted {
+			return nil, huh.ErrUserAborted
 		}
 
 		filtered := filterModels(allModels, searchQuery)
@@ -1097,7 +1422,7 @@ func promptModelsToSave(allModels []string) ([]string, error) {
 			options[i] = huh.NewOption(label, model)
 		}
 
-		selectForm := huh.NewForm(
+		selectForm := newEscBackForm(
 			huh.NewGroup(
 				huh.NewMultiSelect[string]().
 					Title("Select model(s) to save").
@@ -1107,8 +1432,12 @@ func promptModelsToSave(allModels []string) ([]string, error) {
 					Filterable(false),
 			),
 		)
-		if err := selectForm.Run(); err != nil {
+		aborted, err = runFormWithBack(selectForm)
+		if err != nil {
 			return nil, err
+		}
+		if aborted {
+			return nil, huh.ErrUserAborted
 		}
 
 		return selected, nil
@@ -1445,11 +1774,43 @@ func sanitizeModelForFolder(model string) string {
 	return sanitized
 }
 
-func createTimestampFolder(index int, model string) string {
+func createTimestampFolder(index, promptNumber int, model string) string {
 	now := time.Now()
-	return fmt.Sprintf("evals/%d-%02d-%02d_%02d-%02d-%02d_%d_%s",
+	if promptNumber < 1 {
+		promptNumber = 0
+	}
+	return fmt.Sprintf("evals/%d-%02d-%02d_%02d-%02d-%02d_p%d_%d_%s",
 		now.Year(), now.Month(), now.Day(),
-		now.Hour(), now.Minute(), now.Second(), index, sanitizeModelForFolder(model))
+		now.Hour(), now.Minute(), now.Second(), promptNumber, index, sanitizeModelForFolder(model))
+}
+
+func parsePromptNumberFromFolder(folderName string) int {
+	matches := promptNumberRE.FindStringSubmatch(folderName)
+	if len(matches) < 2 {
+		return 0
+	}
+
+	n, err := strconv.Atoi(matches[1])
+	if err != nil || n < 1 {
+		return 0
+	}
+	return n
+}
+
+func buildPromptNumberByPrompt() map[string]int {
+	prompts, err := loadPrompts()
+	if err != nil || len(prompts) == 0 {
+		return map[string]int{}
+	}
+
+	m := make(map[string]int, len(prompts))
+	for i, p := range prompts {
+		if _, exists := m[p]; exists {
+			continue
+		}
+		m[p] = i + 1
+	}
+	return m
 }
 
 func setupEvalFolder(folderPath, prompt string) error {
@@ -1477,6 +1838,7 @@ func setupEvalFolder(folderPath, prompt string) error {
 func saveEvalResult(folderPath string, result EvalResult, model string) {
 	rf := EvalResultFile{
 		Prompt:          result.Prompt,
+		PromptNumber:    result.PromptNumber,
 		Model:           model,
 		Success:         result.Success,
 		Error:           result.Error,
@@ -1499,6 +1861,7 @@ func scanEvalFolders() ([]EvalFolder, error) {
 		return nil, err
 	}
 
+	promptNumberByText := buildPromptNumberByPrompt()
 	var folders []EvalFolder
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -1521,6 +1884,17 @@ func scanEvalFolders() ([]EvalFolder, error) {
 			var rf EvalResultFile
 			if json.Unmarshal(resultData, &rf) == nil {
 				ef.Result = &rf
+				if rf.PromptNumber > 0 {
+					ef.PromptNumber = rf.PromptNumber
+				}
+			}
+		}
+		if ef.PromptNumber == 0 {
+			ef.PromptNumber = parsePromptNumberFromFolder(filepath.Base(path))
+		}
+		if ef.PromptNumber == 0 {
+			if n, ok := promptNumberByText[ef.Prompt]; ok {
+				ef.PromptNumber = n
 			}
 		}
 
@@ -1531,8 +1905,9 @@ func scanEvalFolders() ([]EvalFolder, error) {
 }
 
 type EvalTask struct {
-	Prompt string
-	Folder string // empty = create new folder
+	Prompt       string
+	PromptNumber int
+	Folder       string // empty = create new folder
 }
 
 func runAllEvalsParallel(tasks []EvalTask, model string) []EvalResult {
@@ -1544,7 +1919,7 @@ func runAllEvalsParallel(tasks []EvalTask, model string) []EvalResult {
 		wg.Add(1)
 		go func(index int, t EvalTask) {
 			defer wg.Done()
-			result := runAgentWithRetry(t.Prompt, index, model, t.Folder)
+			result := runAgentWithRetry(t.Prompt, t.PromptNumber, index, model, t.Folder)
 			resultMutex.Lock()
 			results[index] = result
 			resultMutex.Unlock()
@@ -1560,28 +1935,28 @@ func runAllEvalsSequential(tasks []EvalTask, model string) []EvalResult {
 	currentModel := model
 
 	for i, task := range tasks {
-		results[i] = runAgentWithRetry(task.Prompt, i, currentModel, task.Folder)
+		results[i] = runAgentWithRetry(task.Prompt, task.PromptNumber, i, currentModel, task.Folder)
 
 		// On model-not-found, prompt user to correct and re-run this eval
 		if !results[i].Success {
 			isModelErr, suggestions := isModelNotFoundError(results[i].Error)
 			if isModelErr {
 				fmt.Printf("\n[%d] Model not found: %s\n", i, currentModel)
-				corrected := promptModelCorrection(currentModel, suggestions)
-				if corrected == "" {
+				corrected, correctionAborted := promptModelCorrection(currentModel, suggestions)
+				if correctionAborted || corrected == "" {
 					fmt.Println("No model selected, aborting remaining evals.")
 					return results
 				}
 				currentModel = corrected
 				fmt.Printf("[%d] Retrying with model: %s\n", i, currentModel)
-				results[i] = runAgentWithRetry(task.Prompt, i, currentModel, task.Folder)
+				results[i] = runAgentWithRetry(task.Prompt, task.PromptNumber, i, currentModel, task.Folder)
 			}
 		}
 	}
 	return results
 }
 
-func runAgentWithRetry(prompt string, index int, modelStr string, existingFolder string) EvalResult {
+func runAgentWithRetry(prompt string, promptNumber, index int, modelStr string, existingFolder string) EvalResult {
 	maxAttempts := transientRetries + 1
 	if maxAttempts < 1 {
 		maxAttempts = 1
@@ -1595,7 +1970,7 @@ func runAgentWithRetry(prompt string, index int, modelStr string, existingFolder
 			fmt.Printf("[%d] Retry attempt %d/%d after transient failure\n", index, attempt-1, transientRetries)
 		}
 
-		result = runAgent(prompt, index, modelStr, folder)
+		result = runAgent(prompt, promptNumber, index, modelStr, folder)
 		folder = result.Folder
 
 		if result.Success || !isTransientEvalError(result.Error) || attempt == maxAttempts {
@@ -1606,21 +1981,24 @@ func runAgentWithRetry(prompt string, index int, modelStr string, existingFolder
 	return result
 }
 
-func runAgent(prompt string, index int, modelStr string, existingFolder string) EvalResult {
+func runAgent(prompt string, promptNumber, index int, modelStr string, existingFolder string) EvalResult {
 	startTime := time.Now()
 
 	folderPath := existingFolder
 	if folderPath == "" {
-		folderPath = createTimestampFolder(index, modelStr)
+		folderPath = createTimestampFolder(index, promptNumber, modelStr)
+	} else if promptNumber < 1 {
+		promptNumber = parsePromptNumberFromFolder(filepath.Base(folderPath))
 	}
 
 	fmt.Printf("[%d] Starting eval in %s\n", index, folderPath)
 
 	result := EvalResult{
-		Prompt:   prompt,
-		Folder:   folderPath,
-		Success:  false,
-		Duration: 0,
+		Prompt:       prompt,
+		PromptNumber: promptNumber,
+		Folder:       folderPath,
+		Success:      false,
+		Duration:     0,
 	}
 
 	if existingFolder == "" {
@@ -1979,12 +2357,12 @@ func isModelNotFoundError(errMsg string) (bool, []string) {
 	return true, suggestions
 }
 
-func promptModelSelector(description string) string {
+func promptModelSelector(description string) (string, bool) {
 	savedModels, _ := loadSavedModels()
 
 	if len(savedModels) == 0 {
 		var modelStr string
-		form := huh.NewForm(
+		form := newEscBackForm(
 			huh.NewGroup(
 				huh.NewInput().
 					Title("Model to use").
@@ -1993,10 +2371,14 @@ func promptModelSelector(description string) string {
 					Value(&modelStr),
 			),
 		)
-		if err := form.Run(); err != nil {
-			return ""
+		aborted, err := runFormWithBack(form)
+		if err != nil {
+			return "", true
 		}
-		return strings.TrimSpace(modelStr)
+		if aborted {
+			return "", true
+		}
+		return strings.TrimSpace(modelStr), false
 	}
 
 	// Show saved models as a filterable select with custom option
@@ -2007,7 +2389,7 @@ func promptModelSelector(description string) string {
 	options = append(options, huh.NewOption("Type a different model...", "__custom__"))
 
 	var selected string
-	form := huh.NewForm(
+	form := newEscBackForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Model to use").
@@ -2016,17 +2398,21 @@ func promptModelSelector(description string) string {
 				Value(&selected),
 		),
 	)
-	if err := form.Run(); err != nil {
-		return ""
+	aborted, err := runFormWithBack(form)
+	if err != nil {
+		return "", true
+	}
+	if aborted {
+		return "", true
 	}
 
 	if selected != "__custom__" {
-		return selected
+		return selected, false
 	}
 
 	// Custom model input
 	var modelStr string
-	inputForm := huh.NewForm(
+	inputForm := newEscBackForm(
 		huh.NewGroup(
 			huh.NewInput().
 				Title("Enter model ID").
@@ -2034,13 +2420,17 @@ func promptModelSelector(description string) string {
 				Value(&modelStr),
 		),
 	)
-	if err := inputForm.Run(); err != nil {
-		return ""
+	aborted, err = runFormWithBack(inputForm)
+	if err != nil {
+		return "", true
 	}
-	return strings.TrimSpace(modelStr)
+	if aborted {
+		return "", true
+	}
+	return strings.TrimSpace(modelStr), false
 }
 
-func promptModelCorrection(currentModel string, suggestions []string) string {
+func promptModelCorrection(currentModel string, suggestions []string) (string, bool) {
 	savedModels, _ := loadSavedModels()
 
 	// Build options: suggestions first, then saved models, then custom
@@ -2062,7 +2452,7 @@ func promptModelCorrection(currentModel string, suggestions []string) string {
 	options = append(options, huh.NewOption("Type a different model...", "__custom__"))
 
 	var selected string
-	form := huh.NewForm(
+	form := newEscBackForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Pick the correct model").
@@ -2071,16 +2461,20 @@ func promptModelCorrection(currentModel string, suggestions []string) string {
 				Value(&selected),
 		),
 	)
-	if err := form.Run(); err != nil {
-		return ""
+	aborted, err := runFormWithBack(form)
+	if err != nil {
+		return "", true
+	}
+	if aborted {
+		return "", true
 	}
 
 	if selected != "__custom__" {
-		return selected
+		return selected, false
 	}
 
 	var modelStr string
-	inputForm := huh.NewForm(
+	inputForm := newEscBackForm(
 		huh.NewGroup(
 			huh.NewInput().
 				Title("Enter model ID").
@@ -2088,8 +2482,12 @@ func promptModelCorrection(currentModel string, suggestions []string) string {
 				Value(&modelStr),
 		),
 	)
-	if err := inputForm.Run(); err != nil {
-		return ""
+	aborted, err = runFormWithBack(inputForm)
+	if err != nil {
+		return "", true
 	}
-	return strings.TrimSpace(modelStr)
+	if aborted {
+		return "", true
+	}
+	return strings.TrimSpace(modelStr), false
 }
