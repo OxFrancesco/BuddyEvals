@@ -1,0 +1,17 @@
+[
+  {
+    "sign": "Aries",
+    "palette": ["#ff6b3d", "#ffb36b", "#28110a"],
+    "prompt": "Bold ram sigil over a volcanic sky"
+  },
+  {
+    "sign": "Leo",
+    "palette": ["#f2b544", "#fce8a0", "#40200d"],
+    "prompt": "Regal lion crest with sun flares and brass filigree"
+  },
+  {
+    "sign": "Scorpio",
+    "palette": ["#5b2c83", "#d94ef5", "#16091f"],
+    "prompt": "Mystic scorpion emblem inside a glassy night nebula"
+  }
+]

@@ -1,16 +1,124 @@
 [
-  "Use `uv init` before starting. Build a Python Manim animation visualizer (with uv inline dependencies) for the equation `(x^2 + y^2 - 1)^3 = x^2 y^3`, and display the model name `<MODEL_NAME>` in the scene. Keep everything centered, well spaced, non-overlapping, and fully visible in frame. Never add authentication, and if you need to add a database, u must use local options like sqlite or dexiedb. NEVER WRITE TO A FOLDER THAT WAS NOT ASSIGNED TO U Before closing the session, test and open the project, make sure it fully works. Also add a `.run` command to run the codebase so the user can run it easily.",
-  "Organize the data from Notion page `<NOTION_PAGE_URL_OR_ID>` into an Airtable table. Infer sensible columns, normalize inconsistent values, and preserve every source row. Never add authentication, and if you need to add a database, u must use local options like sqlite or dexiedb. NEVER WRITE TO A FOLDER THAT WAS NOT ASSIGNED TO U Before closing the session, test and open the project, make sure it fully works. Also add a `.run` command to run the codebase so the user can run it easily.",
-  "Create a Tinder-like app for SF founders with swipe left/right interactions, founder profile cards, a match view, and realistic local mock data. Make it mobile-first and visually polished. Never add authentication, and if you need to add a database, u must use local options like sqlite or dexiedb. NEVER WRITE TO A FOLDER THAT WAS NOT ASSIGNED TO U Before closing the session, test and open the project, make sure it fully works. Also add a `.run` command to run the codebase so the user can run it easily.",
-  "Build a habit tracker that roasts the user when they miss habits. On a failed streak, generate a sad/stylized version of the user's profile picture and a short AI roast joke (funny, not abusive). Never add authentication, and if you need to add a database, u must use local options like sqlite or dexiedb. NEVER WRITE TO A FOLDER THAT WAS NOT ASSIGNED TO U Before closing the session, test and open the project, make sure it fully works. Also add a `.run` command to run the codebase so the user can run it easily.",
-  "Recreate a Gen 1 Pokemon Guessing Game from this reference: dark retro pixel style, centered title ('Pokemon Guessing Game'), top control row with input, Hint button, mute icon button, Reset button, trophy button, and score box; green feedback text ('Correct!'); and a large grid of numbered square tiles where correct guesses reveal Pokemon sprites in the right slots (e.g., #1 Bulbasaur, #4 Charmander, #7 Squirtle). Match layout, spacing, and retro styling closely. Never add authentication, and if you need to add a database, u must use local options like sqlite or dexiedb. NEVER WRITE TO A FOLDER THAT WAS NOT ASSIGNED TO U Before closing the session, test and open the project, make sure it fully works. Also add a `.run` command to run the codebase so the user can run it easily.",
-  "Create a CLI tool using `https://github.com/sst/opentui` with two commands: `image` to generate images with `<IMAGE_MODEL_OR_API>` and `video` to generate videos with `<VIDEO_MODEL_OR_API>`. Include clear help text, argument validation, and progress/status output. Never add authentication, and if you need to add a database, u must use local options like sqlite or dexiedb. NEVER WRITE TO A FOLDER THAT WAS NOT ASSIGNED TO U Before closing the session, test and open the project, make sure it fully works. Also add a `.run` command to run the codebase so the user can run it easily.",
-  "Create an interactive 3D pumpkin using Three.js and GSAP with smooth rotation/parallax on pointer movement and a short intro animation on load. Never add authentication, and if you need to add a database, u must use local options like sqlite or dexiedb. NEVER WRITE TO A FOLDER THAT WAS NOT ASSIGNED TO U Before closing the session, test and open the project, make sure it fully works. Also add a `.run` command to run the codebase so the user can run it easily.",
-  "Build a Linktree clone for developers in a neo-brutalist, minimal, GitHub-inspired design. Include the profile name `<YOUR_NAME>`, developer links, and a GitHub commits dashboard in the same style. Add a GSAP loading animation where a GitHub logo fills in, plus a subtle ASCII background animation that fits the aesthetic. Never add authentication, and if you need to add a database, u must use local options like sqlite or dexiedb. NEVER WRITE TO A FOLDER THAT WAS NOT ASSIGNED TO U Before closing the session, test and open the project, make sure it fully works. Also add a `.run` command to run the codebase so the user can run it easily.",
-  "Check all GitHub commits made last week (Monday-Sunday, local timezone) by the team and create a Linear task titled 'Weekly Summary' with exactly 5 bullet points explaining the most important changes in simple language. Never add authentication, and if you need to add a database, u must use local options like sqlite or dexiedb. NEVER WRITE TO A FOLDER THAT WAS NOT ASSIGNED TO U Before closing the session, test and open the project, make sure it fully works. Also add a `.run` command to run the codebase so the user can run it easily.",
-  "Create a mobile astrology app with Expo that generates images based on the user's zodiac sign using Nano Banana Pro (`<DOCS_LINK>`). Include sign selection, generate action, loading state, and a simple history/gallery view. Never add authentication, and if you need to add a database, u must use local options like sqlite or dexiedb. NEVER WRITE TO A FOLDER THAT WAS NOT ASSIGNED TO U Before closing the session, test and open the project, make sure it fully works. Also add a `.run` command to run the codebase so the user can run it easily.",
-  "Create a tool that uses a vision model (`<VISION_MODEL>`) to analyze images and rename them with accurate, human-readable, collision-safe filenames. Support batch folders and dry-run mode. Never add authentication, and if you need to add a database, u must use local options like sqlite or dexiedb. NEVER WRITE TO A FOLDER THAT WAS NOT ASSIGNED TO U Before closing the session, test and open the project, make sure it fully works. Also add a `.run` command to run the codebase so the user can run it easily.",
-  "Create a mobile Pomodoro timer app in steampunk style (Expo/React Native). The more focus sessions the user completes, the more their 'compute power' meter grows. Never add authentication, and if you need to add a database, u must use local options like sqlite or dexiedb. NEVER WRITE TO A FOLDER THAT WAS NOT ASSIGNED TO U Before closing the session, test and open the project, make sure it fully works. Also add a `.run` command to run the codebase so the user can run it easily.",
-  "Reproduce a game concept commonly seen in low-quality mobile ads, but make it genuinely playable and fun. Deliver the build plan as 12 concise prompts/steps, each adding one meaningful feature or polish improvement. Never add authentication, and if you need to add a database, u must use local options like sqlite or dexiedb. NEVER WRITE TO A FOLDER THAT WAS NOT ASSIGNED TO U Before closing the session, test and open the project, make sure it fully works. Also add a `.run` command to run the codebase so the user can run it easily.",
-  "Rebuild the experience shown in this reference post: `https://x.com/guo_hq/status/2021614632163565694?s=20`. Match the core UX flow, layout, motion, and visual style as closely as possible, using placeholder assets where needed. Never add authentication, and if you need to add a database, u must use local options like sqlite or dexiedb. NEVER WRITE TO A FOLDER THAT WAS NOT ASSIGNED TO U Before closing the session, test and open the project, make sure it fully works. Also add a `.run` command to run the codebase so the user can run it easily."
+  {
+    "id": "heart-curve-manim",
+    "title": "Heart Curve Manim",
+    "prompt": "Run `uv init` before you start. Build a Python Manim scene for `(x^2 + y^2 - 1)^3 = x^2 y^3`. Display the exact model name `{{MODEL_NAME}}` in the scene. Keep the equation, axes, and curve centered, non-overlapping, and fully visible in frame. The root `.run` script must render the scene and exit non-zero on failure.",
+    "track": "python",
+    "deterministic": true
+  },
+  {
+    "id": "notion-airtable-local",
+    "title": "Notion To Airtable-Style Table",
+    "prompt": "Create a local Airtable-style web app that imports `fixtures/notion-export.json`, infers sensible columns, normalizes inconsistent values, preserves every source row, and clearly shows both the source record and the cleaned record. Include an audit view that explains how each normalized field was derived.",
+    "track": "integration",
+    "deterministic": false,
+    "fixtures": [
+      "fixtures/notion-export.json"
+    ]
+  },
+  {
+    "id": "founder-match",
+    "title": "Founder Match",
+    "prompt": "Create a Tinder-like app for SF founders with swipe left/right interactions, founder profile cards, a match view, and realistic local mock data. Make it mobile-first, visually polished, and clearly usable on small screens without broken layouts.",
+    "track": "web",
+    "deterministic": true
+  },
+  {
+    "id": "habit-roaster",
+    "title": "Habit Roaster",
+    "prompt": "Build a habit tracker that roasts the user when they miss habits. On a failed streak, generate a sad or stylized version of the uploaded profile picture locally and pair it with a short AI-style roast joke that is funny but not abusive. Keep the whole flow self-contained and offline-friendly.",
+    "track": "web",
+    "deterministic": true
+  },
+  {
+    "id": "pokemon-guessing-game",
+    "title": "Pokemon Guessing Game",
+    "prompt": "Recreate a Gen 1 Pokemon Guessing Game from this reference description: dark retro pixel style, centered title ('Pokemon Guessing Game'), top control row with input, Hint button, mute icon button, Reset button, trophy button, and score box; green feedback text ('Correct!'); and a large grid of numbered square tiles where correct guesses reveal Pokemon sprites in the right slots (for example #1 Bulbasaur, #4 Charmander, #7 Squirtle). Match layout, spacing, and retro styling closely.",
+    "track": "web",
+    "deterministic": true
+  },
+  {
+    "id": "mock-media-cli",
+    "title": "Mock Media CLI",
+    "prompt": "Create a Bun CLI using `https://github.com/sst/opentui` with two commands: `image` and `video`. Instead of calling live APIs, read presets and mock provider behavior from `fixtures/mock-media-provider.json`, validate arguments, show progress and status output, and write generated artifact metadata into `output/`. The root `.run` script should execute a smoke path that demonstrates both commands.",
+    "track": "cli",
+    "deterministic": true,
+    "fixtures": [
+      "fixtures/mock-media-provider.json"
+    ]
+  },
+  {
+    "id": "interactive-pumpkin",
+    "title": "Interactive 3D Pumpkin",
+    "prompt": "Create an interactive 3D pumpkin using Three.js and GSAP with smooth rotation or parallax on pointer movement and a short intro animation on load. The finished page should feel intentional, responsive, and visually polished on desktop and mobile browser sizes.",
+    "track": "web",
+    "deterministic": true
+  },
+  {
+    "id": "developer-link-hub",
+    "title": "Developer Link Hub",
+    "prompt": "Build a Linktree clone for developers in a neo-brutalist, minimal, GitHub-inspired design. Use `fixtures/dev-profile.json` and `fixtures/github-activity.json` as the only data sources. Include the concrete profile name `Frances O.`, developer links, and a GitHub commits dashboard in the same style. Add a GSAP loading animation where a GitHub logo fills in, plus a subtle ASCII background animation that fits the aesthetic.",
+    "track": "integration",
+    "deterministic": false,
+    "fixtures": [
+      "fixtures/dev-profile.json",
+      "fixtures/github-activity.json"
+    ]
+  },
+  {
+    "id": "weekly-summary-task",
+    "title": "Weekly Summary Task",
+    "prompt": "Read the bundled commit activity in `fixtures/weekly-git-activity.json` and generate a local Linear-style task file at `output/weekly-summary-task.json`. The task title must be exactly `Weekly Summary`, and the description must contain exactly 5 bullet points that explain the most important changes in simple language.",
+    "track": "integration",
+    "deterministic": false,
+    "fixtures": [
+      "fixtures/weekly-git-activity.json"
+    ]
+  },
+  {
+    "id": "zodiac-gallery-mobile",
+    "title": "Zodiac Gallery Mobile",
+    "prompt": "Create a mobile astrology app with Expo that uses `fixtures/zodiac-gallery.json` and `fixtures/nano-banana-notes.md` to drive a self-contained mock image generation flow for each zodiac sign. Include sign selection, generate action, loading state, and a simple history or gallery view.",
+    "track": "mobile",
+    "deterministic": false,
+    "fixtures": [
+      "fixtures/nano-banana-notes.md",
+      "fixtures/zodiac-gallery.json"
+    ]
+  },
+  {
+    "id": "vision-file-renamer",
+    "title": "Vision File Renamer",
+    "prompt": "Create a local-first tool that uses a pluggable vision adapter with bundled mock data from `fixtures/vision-descriptions.json` to analyze the files in `fixtures/vision-batch/` and rename them with accurate, human-readable, collision-safe filenames. Support batch folders and dry-run mode. The root `.run` script should demonstrate a dry run and a real rename against a copied sample directory.",
+    "track": "cli",
+    "deterministic": true,
+    "fixtures": [
+      "fixtures/vision-batch/",
+      "fixtures/vision-descriptions.json"
+    ]
+  },
+  {
+    "id": "steampunk-pomodoro-mobile",
+    "title": "Steampunk Pomodoro Mobile",
+    "prompt": "Create a mobile Pomodoro timer app in steampunk style with Expo or React Native. As the user completes focus sessions, a visible `compute power` meter should grow and unlock tasteful visual flourishes. Keep the scope self-contained with local state and mock data only.",
+    "track": "mobile",
+    "deterministic": false
+  },
+  {
+    "id": "playable-ad-game",
+    "title": "Playable Ad Game",
+    "prompt": "Reproduce a game concept commonly seen in low-quality mobile ads, but make it genuinely playable and fun. Deliver the build plan as 12 concise prompts or steps, each adding one meaningful feature or polish improvement, and ship the final playable web build in the same workspace.",
+    "track": "web",
+    "deterministic": true
+  },
+  {
+    "id": "reference-post-rebuild",
+    "title": "Reference Post Rebuild",
+    "prompt": "Rebuild the experience described in `fixtures/reference-post.md`. Match the core UX flow, layout, motion, and visual style as closely as possible using only the local reference notes and placeholder assets that you create inside the assigned folder.",
+    "track": "integration",
+    "deterministic": false,
+    "fixtures": [
+      "fixtures/reference-post.md"
+    ]
+  }
 ]

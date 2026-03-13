@@ -1,25 +1,12 @@
 import type { ReportData } from "./types.ts";
 
 export function renderDashboard(report: ReportData): string {
-  const models = [...new Set(report.rows.map((r) => r.model))].sort();
-  const modelOptions = models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+  const models = [...new Set(report.rows.map((row) => row.model))].sort();
+  const tracks = [...new Set(report.rows.map((row) => row.track))].sort();
 
-  const rowsJson = JSON.stringify(
-    report.rows.map((row) => ({
-      folder: row.folder,
-      prompt: row.prompt,
-      promptNumber: row.promptNumber,
-      model: row.model,
-      success: row.success,
-      durationSeconds: row.durationSeconds,
-      completedAt: row.completedAt,
-      completedAtEpoch: row.completedAtEpoch,
-      costUsd: row.costUsd,
-      error: row.error,
-      hasPreview: !!row.previewPath,
-      hasScript: !!row.scriptPath,
-    }))
-  ).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
+  const rowsJson = JSON.stringify(report.rows).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
+  const modelOptions = models.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join("");
+  const trackOptions = tracks.map((track) => `<option value="${escapeHtml(track)}">${escapeHtml(track)}</option>`).join("");
 
   return `<!doctype html>
 <html lang="en">
@@ -29,705 +16,482 @@ export function renderDashboard(report: ReportData): string {
   <title>High-Evals Dashboard</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --bg: #0f0f1a;
-      --fg: #e2e2f5;
-      --card: #1a1a2e;
-      --card-fg: #e2e2f5;
-      --primary: #a48fff;
-      --primary-dim: rgba(164, 143, 255, 0.15);
-      --secondary: #2d2b55;
-      --secondary-fg: #c4c2ff;
-      --muted: #222244;
-      --muted-fg: #a0a0c0;
-      --accent: #303060;
-      --accent-fg: #e2e2f5;
-      --border: #303052;
-      --ring: #a48fff;
-      --ok: #4db6ac;
-      --ok-dim: rgba(77, 182, 172, 0.15);
-      --python: #64b5f6;
-      --python-dim: rgba(100, 181, 246, 0.15);
-      --fail: #ff5470;
-      --fail-dim: rgba(255, 84, 112, 0.15);
-      --chart-1: #a48fff;
-      --chart-2: #7986cb;
-      --chart-3: #64b5f6;
-      --chart-4: #4db6ac;
-      --chart-5: #ff79c6;
+      --bg: #f5f1e8;
+      --panel: rgba(255, 252, 246, 0.9);
+      --panel-strong: #fffaf2;
+      --border: rgba(66, 56, 34, 0.16);
+      --border-strong: rgba(66, 56, 34, 0.28);
+      --text: #2c2417;
+      --muted: #74664b;
+      --accent: #9b5d24;
+      --accent-soft: rgba(155, 93, 36, 0.12);
+      --ok: #1f7a4a;
+      --ok-soft: rgba(31, 122, 74, 0.12);
+      --warn: #9b5d24;
+      --warn-soft: rgba(155, 93, 36, 0.12);
+      --bad: #b2412d;
+      --bad-soft: rgba(178, 65, 45, 0.12);
+      --shadow: 0 18px 60px rgba(78, 54, 17, 0.08);
+      --radius: 18px;
+      --sans: "IBM Plex Sans", system-ui, sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
     }
 
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
 
     body {
-      font-family: "JetBrains Mono", monospace;
-      color: var(--fg);
-      background: var(--bg);
-      min-height: 100vh;
-      padding: 32px 24px;
-      position: relative;
-      overflow-x: hidden;
+      font-family: var(--sans);
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(155, 93, 36, 0.12), transparent 32%),
+        radial-gradient(circle at top right, rgba(31, 122, 74, 0.08), transparent 26%),
+        linear-gradient(180deg, #faf6ef 0%, var(--bg) 100%);
     }
 
-    body::before {
-      content: "";
-      position: fixed;
-      top: -40%;
-      left: -20%;
-      width: 80vw;
-      height: 80vw;
-      border-radius: 50%;
-      background: radial-gradient(circle, rgba(164,143,255,0.07) 0%, transparent 70%);
-      pointer-events: none;
-      z-index: 0;
-    }
-
-    body::after {
-      content: "";
-      position: fixed;
-      bottom: -30%;
-      right: -15%;
-      width: 60vw;
-      height: 60vw;
-      border-radius: 50%;
-      background: radial-gradient(circle, rgba(255,121,198,0.05) 0%, transparent 70%);
-      pointer-events: none;
-      z-index: 0;
-    }
-
-    .wrap {
-      max-width: 1320px;
+    main {
+      max-width: 1480px;
       margin: 0 auto;
+      padding: 40px 24px 56px;
       display: grid;
-      gap: 20px;
-      position: relative;
-      z-index: 1;
+      gap: 18px;
+    }
+
+    .hero, .metrics, .table-card {
+      background: var(--panel);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
     }
 
     .hero {
-      background: linear-gradient(135deg, #1a1a2e 0%, #222244 50%, #1a1a2e 100%);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 32px 28px;
-      position: relative;
-      overflow: hidden;
+      padding: 26px 28px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: end;
     }
 
-    .hero::before {
-      content: "";
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 2px;
-      background: linear-gradient(90deg, transparent, var(--primary), var(--chart-5), transparent);
-    }
-
-    .hero::after {
-      content: "";
-      position: absolute;
-      top: -60px;
-      right: -40px;
-      width: 200px;
-      height: 200px;
-      border-radius: 50%;
-      background: radial-gradient(circle, rgba(164,143,255,0.12) 0%, transparent 70%);
-      pointer-events: none;
+    .eyebrow {
+      font-size: 0.76rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+      font-weight: 600;
+      margin-bottom: 8px;
     }
 
     h1 {
-      font-family: "Space Grotesk", sans-serif;
-      font-size: clamp(1.8rem, 3vw, 2.6rem);
-      font-weight: 700;
-      line-height: 1.1;
-      letter-spacing: -0.02em;
-      background: linear-gradient(135deg, #e2e2f5 0%, #a48fff 50%, #ff79c6 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
+      margin: 0;
+      font-size: clamp(1.7rem, 2vw, 2.4rem);
+      line-height: 1.05;
+      letter-spacing: -0.04em;
     }
 
-    .subtitle {
-      margin-top: 10px;
-      color: var(--muted-fg);
-      font-size: 0.82rem;
-      letter-spacing: 0.01em;
+    .hero-copy {
+      max-width: 760px;
+      color: var(--muted);
+      font-size: 0.98rem;
+      line-height: 1.5;
     }
 
-    .metrics {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
-      gap: 14px;
+    .hero-notes {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      align-items: center;
     }
 
-    .metric {
-      background: var(--card);
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: var(--panel-strong);
       border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 18px 16px;
-      position: relative;
-      overflow: hidden;
-      transition: border-color 0.2s ease, transform 0.15s ease;
-    }
-
-    .metric:hover {
-      border-color: var(--primary);
-      transform: translateY(-2px);
-    }
-
-    .metric::before {
-      content: "";
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 1px;
-      background: linear-gradient(90deg, transparent, var(--primary), transparent);
-      opacity: 0;
-      transition: opacity 0.2s ease;
-    }
-
-    .metric:hover::before {
-      opacity: 1;
-    }
-
-    .metric::after {
-      content: "";
-      position: absolute;
-      bottom: -40px;
-      right: -30px;
-      width: 100px;
-      height: 100px;
-      border-radius: 50%;
-      background: var(--primary-dim);
-      pointer-events: none;
-    }
-
-    .metric-label {
-      font-size: 0.68rem;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--muted-fg);
-      margin-bottom: 10px;
+      color: var(--muted);
+      font-size: 0.78rem;
       font-weight: 500;
     }
 
+    .metrics {
+      padding: 10px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+    }
+
+    .metric {
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px 16px;
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
     .metric-value {
-      font-family: "Space Grotesk", sans-serif;
-      font-weight: 700;
-      font-size: 1.4rem;
-      color: var(--fg);
-      position: relative;
-      z-index: 1;
+      font-family: var(--mono);
+      font-size: 1.15rem;
+      font-weight: 500;
     }
 
     .table-card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 14px;
       overflow: hidden;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: end;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255, 250, 242, 0.72);
+    }
+
+    .filter {
+      display: grid;
+      gap: 6px;
+    }
+
+    .filter label {
+      color: var(--muted);
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+
+    .filter select,
+    .filter input,
+    .toolbar button {
+      min-height: 38px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel-strong);
+      color: var(--text);
+      font: inherit;
+      padding: 0 12px;
+    }
+
+    .filter input {
+      min-width: 220px;
+    }
+
+    .toolbar button {
+      cursor: pointer;
+      font-weight: 600;
+      transition: border-color 0.15s ease, transform 0.15s ease;
+    }
+
+    .toolbar button:hover,
+    .action-btn:hover,
+    .overlay-header button:hover {
+      border-color: var(--border-strong);
+      transform: translateY(-1px);
+    }
+
+    .toolbar-spacer {
+      flex: 1 1 auto;
     }
 
     .table-wrap {
       overflow: auto;
     }
 
-    .table-wrap::-webkit-scrollbar {
-      height: 6px;
-    }
-
-    .table-wrap::-webkit-scrollbar-track {
-      background: var(--muted);
-    }
-
-    .table-wrap::-webkit-scrollbar-thumb {
-      background: var(--border);
-      border-radius: 3px;
-    }
-
     table {
       width: 100%;
+      min-width: 1220px;
       border-collapse: collapse;
-      min-width: 1060px;
     }
 
     thead {
-      background: var(--secondary);
+      background: rgba(255, 250, 242, 0.86);
+    }
+
+    th, td {
+      text-align: left;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
     }
 
     th {
-      text-align: left;
-      padding: 12px 14px;
-      font-size: 0.68rem;
+      color: var(--muted);
+      font-size: 0.72rem;
       letter-spacing: 0.08em;
       text-transform: uppercase;
-      color: var(--secondary-fg);
       font-weight: 600;
-      border-bottom: 1px solid var(--border);
-    }
-
-    td {
-      text-align: left;
-      padding: 12px 14px;
-      border-bottom: 1px solid rgba(48, 48, 82, 0.5);
-      vertical-align: top;
-      font-size: 0.82rem;
-      color: var(--fg);
-    }
-
-    tbody tr {
-      transition: background 0.15s ease;
+      white-space: nowrap;
     }
 
     tbody tr:hover {
-      background: rgba(164, 143, 255, 0.05);
+      background: rgba(155, 93, 36, 0.035);
     }
 
-    .tag {
-      display: inline-block;
-      padding: 3px 9px;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      background: var(--accent);
-      color: var(--accent-fg);
-      font-size: 0.75rem;
+    .prompt-title {
       font-weight: 600;
+      margin-bottom: 4px;
+      line-height: 1.35;
     }
 
-    .prompt-col {
-      max-width: 300px;
-      line-height: 1.4;
-      color: var(--muted-fg);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      cursor: default;
-    }
-
-    .folder-col {
-      color: var(--muted-fg);
-      font-size: 0.72rem;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 220px;
-      cursor: default;
-    }
-
-    .actions-col {
-      white-space: nowrap;
-    }
-
-    .filters {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      align-items: center;
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--border);
-      background: var(--secondary);
-    }
-
-    .filter-group {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .filter-label {
-      font-size: 0.65rem;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--muted-fg);
-      font-weight: 500;
-    }
-
-    .filter-select, .filter-input {
-      background: var(--card);
-      border: 1px solid var(--border);
-      color: var(--fg);
-      border-radius: 6px;
-      padding: 5px 10px;
-      font-family: inherit;
-      font-size: 0.75rem;
-      outline: none;
-      transition: border-color 0.15s ease;
-    }
-
-    .filter-select:focus, .filter-input:focus {
-      border-color: var(--primary);
-    }
-
-    .filter-input {
-      width: 160px;
-    }
-
-    .filter-reset {
-      background: none;
-      border: 1px solid var(--border);
-      color: var(--muted-fg);
-      border-radius: 6px;
-      padding: 5px 10px;
-      font-family: inherit;
-      font-size: 0.72rem;
-      cursor: pointer;
-      transition: color 0.15s ease, border-color 0.15s ease;
-      margin-left: auto;
-    }
-
-    .filter-reset:hover {
-      color: var(--fg);
-      border-color: var(--fg);
-    }
-
-    .filter-count {
-      font-size: 0.72rem;
-      color: var(--muted-fg);
-    }
-
-    th.sortable {
-      cursor: pointer;
-      user-select: none;
-      position: relative;
-    }
-
-    th.sortable:hover {
-      color: var(--fg);
-    }
-
-    th .sort-arrow {
-      margin-left: 4px;
-      font-size: 0.6rem;
-      opacity: 0.3;
-    }
-
-    th.sort-asc .sort-arrow,
-    th.sort-desc .sort-arrow {
-      opacity: 1;
-      color: var(--primary);
-    }
-
-    .tooltip {
-      position: fixed;
-      z-index: 9999;
-      max-width: 450px;
-      padding: 10px 14px;
-      background: var(--secondary);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      color: var(--fg);
-      font-size: 0.76rem;
+    .prompt-meta,
+    .folder-text,
+    .error-text {
+      color: var(--muted);
+      font-size: 0.82rem;
       line-height: 1.45;
-      pointer-events: none;
-      white-space: pre-wrap;
-      word-break: break-word;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-      opacity: 0;
-      transform: translateY(4px);
-      transition: opacity 0.15s ease, transform 0.15s ease;
     }
 
-    .tooltip.visible {
-      opacity: 1;
-      transform: translateY(0);
+    .folder-text,
+    .mono {
+      font-family: var(--mono);
+      font-size: 0.74rem;
+    }
+
+    .status-stack {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
     }
 
     .status {
       display: inline-flex;
       align-items: center;
-      gap: 5px;
-      border-radius: 6px;
-      padding: 3px 10px;
-      font-weight: 700;
-      font-size: 0.72rem;
-      letter-spacing: 0.03em;
-      text-transform: uppercase;
-    }
-
-    .status-wrap {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .info-btn {
-      width: 18px;
-      height: 18px;
+      padding: 4px 8px;
       border-radius: 999px;
-      border: 1px solid rgba(100, 181, 246, 0.5);
-      background: rgba(100, 181, 246, 0.15);
-      color: var(--python);
-      font-family: "JetBrains Mono", monospace;
-      font-size: 0.66rem;
-      font-weight: 700;
-      line-height: 1;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
-    }
-
-    .info-btn:hover {
-      background: rgba(100, 181, 246, 0.26);
-      border-color: var(--python);
-      transform: translateY(-1px);
-    }
-
-    .info-btn:active {
-      transform: translateY(0);
-    }
-
-    .info-btn:focus-visible {
-      outline: 2px solid var(--python);
-      outline-offset: 1px;
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      font-weight: 500;
+      white-space: nowrap;
+      border: 1px solid transparent;
     }
 
     .status-ok {
-      background: var(--ok-dim);
       color: var(--ok);
-      border: 1px solid rgba(77, 182, 172, 0.3);
+      background: var(--ok-soft);
+      border-color: rgba(31, 122, 74, 0.18);
     }
 
-    .status-fail {
-      background: var(--fail-dim);
-      color: var(--fail);
-      border: 1px solid rgba(255, 84, 112, 0.3);
+    .status-bad {
+      color: var(--bad);
+      background: var(--bad-soft);
+      border-color: rgba(178, 65, 45, 0.18);
     }
 
-    .empty {
-      padding: 48px 24px;
-      text-align: center;
-      color: var(--muted-fg);
-      font-size: 0.88rem;
+    .status-warn {
+      color: var(--warn);
+      background: var(--warn-soft);
+      border-color: rgba(155, 93, 36, 0.18);
     }
 
-    .footer-note {
-      color: var(--muted-fg);
-      font-size: 0.7rem;
-      margin-top: 4px;
-      opacity: 0.7;
+    .status-dim {
+      color: var(--muted);
+      background: rgba(116, 102, 75, 0.1);
+      border-color: rgba(116, 102, 75, 0.12);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
     }
 
     .action-btn {
-      border-radius: 6px;
-      width: 78px;
-      height: 28px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      font-family: inherit;
-      font-size: 0.72rem;
-      font-weight: 600;
-      letter-spacing: 0.03em;
-      cursor: pointer;
-      transition: background 0.15s ease, border-color 0.15s ease;
-    }
-
-    .preview-btn {
-      background: var(--primary-dim);
-      color: var(--primary);
-      border: 1px solid rgba(164, 143, 255, 0.3);
-    }
-
-    .preview-btn:hover {
-      background: rgba(164, 143, 255, 0.25);
-      border-color: var(--primary);
-    }
-
-    .run-btn {
-      background: var(--python-dim);
-      color: var(--python);
-      border: 1px solid rgba(100, 181, 246, 0.35);
-    }
-
-    .run-btn:hover {
-      background: rgba(100, 181, 246, 0.25);
-      border-color: var(--python);
-    }
-
-    .run-btn.running {
-      opacity: 0.5;
-      pointer-events: none;
-    }
-
-    .pick-btn {
-      background: rgba(160, 160, 192, 0.12);
-      color: var(--muted-fg);
+      min-height: 32px;
+      padding: 0 12px;
+      border-radius: 10px;
       border: 1px solid var(--border);
-      border-radius: 6px;
-      width: 52px;
-      height: 28px;
-      font-family: inherit;
-      font-size: 0.7rem;
+      background: var(--panel-strong);
+      color: var(--text);
+      font: inherit;
+      font-size: 0.8rem;
       font-weight: 600;
-      letter-spacing: 0.02em;
       cursor: pointer;
-      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+      transition: border-color 0.15s ease, transform 0.15s ease;
     }
 
-    .pick-btn:hover {
-      background: rgba(160, 160, 192, 0.22);
-      border-color: var(--muted-fg);
-      color: var(--fg);
+    .action-btn.primary {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border-color: rgba(155, 93, 36, 0.2);
     }
 
-    .no-preview {
-      color: var(--muted-fg);
-      opacity: 0.4;
+    .action-btn.success {
+      background: var(--ok-soft);
+      color: var(--ok);
+      border-color: rgba(31, 122, 74, 0.2);
     }
 
-    .preview-overlay {
+    .action-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .empty-state {
+      padding: 46px 20px;
+      text-align: center;
+      color: var(--muted);
+    }
+
+    .overlay {
       position: fixed;
       inset: 0;
-      background: rgba(15, 15, 26, 0.85);
-      backdrop-filter: blur(8px);
-      z-index: 1000;
-      display: flex;
+      display: none;
       align-items: center;
       justify-content: center;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.25s ease;
+      background: rgba(30, 21, 9, 0.56);
+      backdrop-filter: blur(10px);
+      padding: 20px;
+      z-index: 20;
     }
 
-    .preview-overlay.active {
-      opacity: 1;
-      pointer-events: all;
+    .overlay.active {
+      display: flex;
     }
 
-    .preview-modal {
-      width: 92vw;
-      height: 88vh;
-      max-width: 1400px;
-      background: var(--card);
+    .overlay-card {
+      width: min(1380px, 94vw);
+      height: min(88vh, 980px);
+      background: var(--panel-strong);
       border: 1px solid var(--border);
-      border-radius: 14px;
+      border-radius: 18px;
       overflow: hidden;
       display: flex;
       flex-direction: column;
-      transform: scale(0.95) translateY(10px);
-      transition: transform 0.25s ease;
+      box-shadow: var(--shadow);
     }
 
-    .preview-overlay.active .preview-modal {
-      transform: scale(1) translateY(0);
+    .overlay-card.run-card {
+      width: min(980px, 94vw);
+      height: min(72vh, 760px);
     }
 
-    .preview-header {
+    .overlay-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 12px 18px;
+      gap: 12px;
+      padding: 14px 16px;
       border-bottom: 1px solid var(--border);
-      background: var(--secondary);
-      flex-shrink: 0;
+      background: rgba(255, 250, 242, 0.88);
     }
 
-    .preview-title {
-      font-size: 0.78rem;
+    .overlay-title {
+      min-width: 0;
       font-weight: 600;
-      color: var(--secondary-fg);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 60%;
     }
 
-    .preview-actions {
+    .overlay-actions {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
     }
 
-    .preview-open {
-      color: var(--primary);
-      font-size: 0.72rem;
-      font-weight: 600;
+    .overlay-link {
+      color: var(--accent);
       text-decoration: none;
-      font-family: inherit;
+      font-weight: 600;
+      font-size: 0.84rem;
     }
 
-    .preview-open:hover {
+    .overlay-link:hover {
       text-decoration: underline;
     }
 
-    .preview-close {
-      background: var(--accent);
+    .overlay-header button {
+      min-height: 32px;
+      min-width: 32px;
+      border-radius: 10px;
       border: 1px solid var(--border);
-      color: var(--fg);
-      width: 28px;
-      height: 28px;
-      border-radius: 6px;
-      font-size: 0.9rem;
+      background: var(--panel-strong);
       cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: background 0.15s ease;
     }
 
-    .preview-close:hover {
-      background: var(--fail-dim);
-      border-color: rgba(255, 84, 112, 0.3);
-      color: var(--fail);
-    }
-
-    .preview-iframe {
-      flex: 1;
+    iframe {
+      flex: 1 1 auto;
       width: 100%;
-      border: none;
+      border: 0;
       background: #fff;
     }
 
-    .run-modal {
-      max-width: 900px;
-      height: 70vh;
-    }
-
-    .run-output {
-      flex: 1;
+    pre {
       margin: 0;
-      padding: 18px;
+      flex: 1 1 auto;
       overflow: auto;
-      font-family: "JetBrains Mono", monospace;
+      padding: 18px;
+      font-family: var(--mono);
       font-size: 0.78rem;
-      line-height: 1.5;
-      color: var(--fg);
-      background: var(--bg);
+      line-height: 1.55;
+      background: #211a0f;
+      color: #f8f2e6;
       white-space: pre-wrap;
-      word-break: break-all;
+      word-break: break-word;
     }
 
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(8px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
+    @media (max-width: 840px) {
+      main {
+        padding: 18px 14px 28px;
+      }
 
-    .hero, .metrics, .table-card, .footer-note {
-      animation: fadeIn 0.4s ease-out both;
+      .hero, .metrics, .table-card {
+        border-radius: 16px;
+      }
+
+      .filter input {
+        min-width: 100%;
+      }
     }
-    .metrics { animation-delay: 0.05s; }
-    .table-card { animation-delay: 0.1s; }
-    .footer-note { animation-delay: 0.15s; }
   </style>
 </head>
 <body>
-  <main class="wrap">
+  <main>
     <section class="hero">
-      <h1>High-Evals Runboard</h1>
-      <div class="subtitle">Live summary of local eval folders, runtime, and available cost metadata.</div>
+      <div>
+        <div class="eyebrow">High-Evals Dashboard</div>
+        <h1>Runnable eval quality, not idle-state theater.</h1>
+        <div class="hero-copy">
+          Agent completion, validation success, preview mode, and run contracts are tracked separately. Headline rates exclude mobile and integration tracks until they have dedicated runtime harnesses.
+        </div>
+      </div>
+      <div class="hero-notes">
+        <span class="chip">Headline suite: ${report.headlineEvals} runs</span>
+        <span class="chip">Full suite: ${report.totalEvals} runs</span>
+      </div>
     </section>
 
     <section class="metrics">
       <article class="metric">
-        <div class="metric-label">Total Runs</div>
-        <div class="metric-value">${report.totalEvals}</div>
+        <div class="metric-label">Headline Success</div>
+        <div class="metric-value">${formatPercent(report.headlineSuccessRate)}</div>
       </article>
       <article class="metric">
-        <div class="metric-label">Success Rate</div>
+        <div class="metric-label">Agent Success</div>
+        <div class="metric-value">${report.agentSuccessfulEvals}/${report.totalEvals}</div>
+      </article>
+      <article class="metric">
+        <div class="metric-label">Validation Pass</div>
+        <div class="metric-value">${formatPercent(report.validationRate)}</div>
+      </article>
+      <article class="metric">
+        <div class="metric-label">Full Success</div>
         <div class="metric-value">${formatPercent(report.successRate)}</div>
       </article>
       <article class="metric">
@@ -735,432 +499,301 @@ export function renderDashboard(report: ReportData): string {
         <div class="metric-value">${formatDuration(report.totalDurationSeconds)}</div>
       </article>
       <article class="metric">
-        <div class="metric-label">Avg Runtime</div>
-        <div class="metric-value">${formatDuration(Math.round(report.averageDurationSeconds))}</div>
-      </article>
-      <article class="metric">
         <div class="metric-label">Known Cost</div>
-        <div class="metric-value">${formatCost(report.totalKnownCostUsd)}</div>
-      </article>
-      <article class="metric">
-        <div class="metric-label">Cost Coverage</div>
-        <div class="metric-value">${report.knownCostCount}/${report.totalEvals}</div>
+        <div class="metric-value">${formatCost(report.totalKnownCostUsd)} · ${report.knownCostCount}/${report.totalEvals}</div>
       </article>
     </section>
 
     <section class="table-card">
-      <div class="filters" id="filtersBar">
-        <div class="filter-group">
-          <span class="filter-label">Model</span>
-          <select class="filter-select" id="filterModel" onchange="applyFilters()">
+      <div class="toolbar">
+        <div class="filter">
+          <label for="filter-model">Model</label>
+          <select id="filter-model" onchange="applyFilters()">
             <option value="">All</option>
             ${modelOptions}
           </select>
         </div>
-        <div class="filter-group">
-          <span class="filter-label">Status</span>
-          <select class="filter-select" id="filterStatus" onchange="applyFilters()">
+        <div class="filter">
+          <label for="filter-track">Track</label>
+          <select id="filter-track" onchange="applyFilters()">
             <option value="">All</option>
-            <option value="success">Success</option>
-            <option value="failed">Failed</option>
+            ${trackOptions}
           </select>
         </div>
-        <div class="filter-group">
-          <span class="filter-label">Search</span>
-          <input class="filter-input" id="filterSearch" type="text" placeholder="prompt, folder…" oninput="applyFilters()" />
+        <div class="filter">
+          <label for="filter-status">Status</label>
+          <select id="filter-status" onchange="applyFilters()">
+            <option value="">All</option>
+            <option value="success">Validated success</option>
+            <option value="agent_failed">Agent failed</option>
+            <option value="validation_failed">Validation failed</option>
+            <option value="legacy">Legacy/partial</option>
+          </select>
         </div>
-        <span class="filter-count" id="filterCount"></span>
-        <button class="filter-reset" onclick="resetFilters()">Reset</button>
+        <div class="filter">
+          <label for="filter-search">Search</label>
+          <input id="filter-search" type="text" placeholder="prompt, folder, violation..." oninput="applyFilters()" />
+        </div>
+        <div class="toolbar-spacer"></div>
+        <div class="chip" id="row-count">${report.rows.length} shown</div>
+        <button type="button" onclick="resetFilters()">Reset</button>
       </div>
+
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
               <th>Prompt</th>
-              <th>Prompt Preview</th>
-              <th class="sortable" data-sort="model" onclick="toggleSort('model')">Model<span class="sort-arrow">↕</span></th>
-              <th class="sortable" data-sort="duration" onclick="toggleSort('duration')">Runtime<span class="sort-arrow">↕</span></th>
-              <th class="sortable" data-sort="cost" onclick="toggleSort('cost')">Cost<span class="sort-arrow">↕</span></th>
-              <th class="sortable" data-sort="status" onclick="toggleSort('status')">Status<span class="sort-arrow">↕</span></th>
-              <th class="sortable" data-sort="date" onclick="toggleSort('date')">Completed<span class="sort-arrow">↕</span></th>
+              <th>Model</th>
+              <th>Track</th>
+              <th>Agent</th>
+              <th>Validation</th>
+              <th>Preview</th>
+              <th>Run</th>
+              <th>Violations</th>
+              <th>Completed</th>
               <th>Folder</th>
               <th>Actions</th>
             </tr>
           </thead>
-          <tbody id="evalsBody"></tbody>
+          <tbody id="rows"></tbody>
         </table>
       </div>
     </section>
-
-    <div class="footer-note">Cost values are shown when present in result metadata fields: cost_usd, total_cost, or cost.</div>
   </main>
 
-  <div class="preview-overlay" id="previewOverlay" onclick="closePreview(event)">
-    <div class="preview-modal">
-      <div class="preview-header">
-        <span class="preview-title" id="previewTitle"></span>
-        <div class="preview-actions">
-          <a class="preview-open" id="previewOpenLink" href="#" target="_blank">Open in tab ↗</a>
-          <button class="preview-close" onclick="closePreview()">✕</button>
+  <div class="overlay" id="preview-overlay" onclick="closeOverlay(event, 'preview-overlay')">
+    <div class="overlay-card">
+      <div class="overlay-header">
+        <div class="overlay-title" id="preview-title"></div>
+        <div class="overlay-actions">
+          <a id="preview-link" class="overlay-link" href="#" target="_blank" rel="noreferrer">Open in tab</a>
+          <button type="button" onclick="closeOverlay(null, 'preview-overlay')">✕</button>
         </div>
       </div>
-      <iframe class="preview-iframe" id="previewIframe" sandbox="allow-scripts allow-same-origin"></iframe>
+      <iframe id="preview-frame" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
     </div>
   </div>
 
-  <div class="preview-overlay" id="runOverlay" onclick="closeRunOutput(event)">
-    <div class="preview-modal run-modal">
-      <div class="preview-header">
-        <span class="preview-title" id="runTitle"></span>
-        <div class="preview-actions">
-          <button class="preview-close" onclick="closeRunOutput()">✕</button>
+  <div class="overlay" id="run-overlay" onclick="closeOverlay(event, 'run-overlay')">
+    <div class="overlay-card run-card">
+      <div class="overlay-header">
+        <div class="overlay-title" id="run-title"></div>
+        <div class="overlay-actions">
+          <button type="button" onclick="closeOverlay(null, 'run-overlay')">✕</button>
         </div>
       </div>
-      <pre class="run-output" id="runOutput"></pre>
+      <pre id="run-output"></pre>
     </div>
   </div>
-
-  <div class="tooltip" id="tooltip"></div>
 
   <script>
-    var ALL_ROWS = ${rowsJson};
-    var currentSort = { key: 'date', dir: 'desc' };
+    const rows = ${rowsJson};
+    let filteredRows = [...rows];
 
-    function esc(s) {
-      var d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
     }
 
-    function fmtDuration(s) {
-      if (!s || s <= 0) return '0s';
-      s = Math.floor(s);
-      var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
-      if (h > 0) return h + 'h ' + m + 'm ' + r + 's';
-      if (m > 0) return m + 'm ' + r + 's';
-      return r + 's';
+    function badge(kind, label, title = "") {
+      const safeTitle = title ? \` title="\${escapeHtml(title)}"\` : "";
+      return \`<span class="status \${kind}"\${safeTitle}>\${escapeHtml(label)}</span>\`;
     }
 
-    function fmtCost(c) {
-      if (c === null || c === undefined) return 'N/A';
-      return '$' + c.toFixed(4);
+    function formatDate(value) {
+      if (!value) return "Unknown";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleString();
     }
 
-    function fmtDate(s) {
-      if (!s) return '-';
-      var d = new Date(s);
-      return isNaN(d.getTime()) ? s : d.toLocaleString();
+    function formatDuration(seconds) {
+      const total = Math.max(0, Number(seconds || 0));
+      const minutes = Math.floor(total / 60);
+      const rem = total % 60;
+      if (minutes > 0) return \`\${minutes}m \${rem}s\`;
+      return \`\${rem}s\`;
     }
 
-    function getFiltered() {
-      var model = document.getElementById('filterModel').value;
-      var status = document.getElementById('filterStatus').value;
-      var search = document.getElementById('filterSearch').value.toLowerCase().trim();
-      return ALL_ROWS.filter(function(r) {
-        if (model && r.model !== model) return false;
-        if (status === 'success' && !r.success) return false;
-        if (status === 'failed' && r.success) return false;
-        if (search && r.prompt.toLowerCase().indexOf(search) === -1 && r.folder.toLowerCase().indexOf(search) === -1 && r.model.toLowerCase().indexOf(search) === -1) return false;
-        return true;
-      });
+    function formatCost(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) return "n/a";
+      return \`$\${Number(value).toFixed(4)}\`;
     }
 
-    function getSorted(rows) {
-      var k = currentSort.key, d = currentSort.dir === 'asc' ? 1 : -1;
-      return rows.slice().sort(function(a, b) {
-        var av, bv;
-        if (k === 'model') { av = a.model.toLowerCase(); bv = b.model.toLowerCase(); return av < bv ? -d : av > bv ? d : 0; }
-        if (k === 'duration') return (a.durationSeconds - b.durationSeconds) * d;
-        if (k === 'cost') { av = (a.costUsd === null || a.costUsd === undefined) ? -1 : a.costUsd; bv = (b.costUsd === null || b.costUsd === undefined) ? -1 : b.costUsd; return (av - bv) * d; }
-        if (k === 'status') { av = a.success ? 1 : 0; bv = b.success ? 1 : 0; return (av - bv) * d; }
-        if (k === 'date') { av = a.completedAtEpoch || 0; bv = b.completedAtEpoch || 0; return (av - bv) * d; }
-        return 0;
-      });
+    function statusFilterMatches(row, selected) {
+      if (!selected) return true;
+      if (selected === "success") return row.success;
+      if (selected === "agent_failed") return !row.agentSuccess;
+      if (selected === "validation_failed") return row.agentSuccess && !row.validationSuccess;
+      if (selected === "legacy") return row.legacy;
+      return true;
     }
 
-    function buildActions(row) {
-      var el = document.createElement('td');
-      el.className = 'actions-col';
-      if (row.hasPreview) {
-        var pb = document.createElement('button');
-        pb.className = 'action-btn preview-btn';
-        pb.textContent = 'Preview';
-        pb.onclick = function() { openPreview('/preview/' + row.folder + '/', row.folder); };
-        el.appendChild(pb);
-      }
-      if (row.hasScript) {
-        if (row.hasPreview) el.appendChild(document.createTextNode(' '));
-        var rb = document.createElement('button');
-        rb.className = 'action-btn run-btn';
-        rb.textContent = 'Run';
-        rb.onclick = function() { runScript(row.folder, rb); };
-        el.appendChild(rb);
-        el.appendChild(document.createTextNode(' '));
-        var cb = document.createElement('button');
-        cb.className = 'pick-btn';
-        cb.textContent = 'Pick';
-        cb.onclick = function() { chooseRunTarget(row.folder, rb); };
-        el.appendChild(cb);
-      }
-      if (!row.hasPreview && !row.hasScript) {
-        el.innerHTML = '<span class="no-preview">\u2014</span>';
-      }
-      return el;
+    function matchesSearch(row, query) {
+      if (!query) return true;
+      const haystack = [
+        row.prompt,
+        row.promptTitle,
+        row.promptID,
+        row.folder,
+        row.model,
+        row.track,
+        row.error,
+        ...(row.violations || []),
+      ].filter(Boolean).join("\\n").toLowerCase();
+      return haystack.includes(query);
     }
 
     function renderRows() {
-      var filtered = getFiltered();
-      var sorted = getSorted(filtered);
-      var body = document.getElementById('evalsBody');
-      document.getElementById('filterCount').textContent = sorted.length + ' / ' + ALL_ROWS.length;
-      body.innerHTML = '';
+      const tbody = document.getElementById("rows");
+      const count = document.getElementById("row-count");
+      count.textContent = \`\${filteredRows.length} shown\`;
 
-      if (sorted.length === 0) {
-        body.innerHTML = '<tr><td colspan="9" class="empty">No matching results.</td></tr>';
+      if (filteredRows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state">No evals match the current filters.</div></td></tr>';
         return;
       }
 
-      for (var i = 0; i < sorted.length; i++) {
-        var row = sorted[i];
-        var tr = document.createElement('tr');
-        var tag = row.promptNumber === null ? 'p?' : 'p' + row.promptNumber;
-        var sc = row.success ? 'status-ok' : 'status-fail';
-        var sl = row.success ? 'Success' : 'Failed';
-        var statusInfo = row.error
-          ? '<button class="info-btn" type="button" aria-label="Show status details" data-info="' + esc(row.error) + '" onclick="showInfo(event, this)">i</button>'
-          : '';
+      tbody.innerHTML = filteredRows.map((row) => {
+        const promptLabel = row.promptNumber ? \`p\${row.promptNumber}\` : row.promptID || "prompt";
+        const promptTitle = row.promptTitle || row.prompt;
+        const promptPreview = row.prompt.length > 160 ? \`\${row.prompt.slice(0, 157)}...\` : row.prompt;
+        const violations = Array.isArray(row.violations) ? row.violations : [];
+        const violationTitle = violations.join("\\n");
+        const validationLabel = row.validationSuccess ? "pass" : "fail";
+        const previewLabel = row.previewMode === "project_server"
+          ? "project server"
+          : row.previewMode === "static"
+            ? "static"
+            : "none";
+        const runLabel = row.runMode === "none" ? "none" : row.runMode;
+        const previewButton = row.previewPath
+          ? \`<button type="button" class="action-btn primary" onclick="openPreview('\${escapeHtml(row.folder)}')">Preview</button>\`
+          : "";
+        const pickButton = row.runMode === "uv" || row.runMode === "legacy"
+          ? \`<button type="button" class="action-btn" onclick="pickRunTarget('\${escapeHtml(row.folder)}')">Pick</button>\`
+          : "";
+        const runButton = row.runMode !== "none"
+          ? \`<button type="button" class="action-btn success" onclick="runEval('\${escapeHtml(row.folder)}')">Run</button>\`
+          : "";
 
-        tr.innerHTML =
-          '<td><span class="tag">' + esc(tag) + '</span></td>' +
-          '<td class="prompt-col" data-tip="' + esc(row.prompt) + '">' + esc(row.prompt) + '</td>' +
-          '<td>' + esc(row.model) + '</td>' +
-          '<td>' + fmtDuration(row.durationSeconds) + '</td>' +
-          '<td>' + fmtCost(row.costUsd) + '</td>' +
-          '<td><span class="status-wrap"><span class="status ' + sc + '">' + sl + '</span>' + statusInfo + '</span></td>' +
-          '<td>' + esc(fmtDate(row.completedAt)) + '</td>' +
-          '<td class="folder-col" data-tip="' + esc(row.folder) + '">' + esc(row.folder) + '</td>';
-        tr.appendChild(buildActions(row));
-        body.appendChild(tr);
-      }
+        return \`<tr>
+          <td>
+            <div class="prompt-title">\${escapeHtml(promptTitle)}</div>
+            <div class="status-stack" style="margin-bottom:6px;">
+              \${badge("status-dim", promptLabel)}
+              \${row.legacy ? badge("status-warn", "legacy") : ""}
+              \${row.headlineEligible ? badge("status-ok", "headline") : badge("status-dim", "non-headline")}
+            </div>
+            <div class="prompt-meta">\${escapeHtml(promptPreview)}</div>
+            \${row.error ? \`<div class="error-text" style="margin-top:8px;">\${escapeHtml(row.error)}</div>\` : ""}
+          </td>
+          <td class="mono">\${escapeHtml(row.model)}</td>
+          <td><div class="status-stack">\${badge("status-dim", row.track)}</div></td>
+          <td><div class="status-stack">\${row.agentSuccess ? badge("status-ok", "ok") : badge("status-bad", "failed")}</div></td>
+          <td><div class="status-stack">\${row.validationSuccess ? badge("status-ok", validationLabel) : badge("status-bad", validationLabel)}\${row.checks && Object.keys(row.checks).length ? badge("status-dim", \`\${Object.values(row.checks).filter(Boolean).length}/\${Object.keys(row.checks).length}\`) : ""}</div></td>
+          <td><div class="status-stack">\${row.previewMode === "none" ? badge("status-dim", previewLabel) : badge(row.previewMode === "static" ? "status-ok" : "status-warn", previewLabel)}</div></td>
+          <td><div class="status-stack">\${row.runMode === "none" ? badge("status-dim", runLabel) : badge(row.runMode === ".run" ? "status-ok" : "status-warn", runLabel)}</div></td>
+          <td><div class="status-stack">\${violations.length === 0 ? badge("status-ok", "0") : badge("status-bad", String(violations.length), violationTitle)}</div></td>
+          <td class="prompt-meta">\${escapeHtml(formatDate(row.completedAt))}<br><span class="mono">\${escapeHtml(formatDuration(row.durationSeconds))} · \${escapeHtml(formatCost(row.costUsd))}</span></td>
+          <td class="folder-text">\${escapeHtml(row.folder)}</td>
+          <td><div class="actions">\${previewButton}\${runButton}\${pickButton || ""}</div></td>
+        </tr>\`;
+      }).join("");
     }
 
-    function applyFilters() { renderRows(); updateSortHeaders(); }
+    function applyFilters() {
+      const model = document.getElementById("filter-model").value;
+      const track = document.getElementById("filter-track").value;
+      const status = document.getElementById("filter-status").value;
+      const search = document.getElementById("filter-search").value.trim().toLowerCase();
+
+      filteredRows = rows
+        .filter((row) => !model || row.model === model)
+        .filter((row) => !track || row.track === track)
+        .filter((row) => statusFilterMatches(row, status))
+        .filter((row) => matchesSearch(row, search))
+        .sort((a, b) => (b.completedAtEpoch || 0) - (a.completedAtEpoch || 0));
+
+      renderRows();
+    }
 
     function resetFilters() {
-      document.getElementById('filterModel').value = '';
-      document.getElementById('filterStatus').value = '';
-      document.getElementById('filterSearch').value = '';
+      document.getElementById("filter-model").value = "";
+      document.getElementById("filter-track").value = "";
+      document.getElementById("filter-status").value = "";
+      document.getElementById("filter-search").value = "";
       applyFilters();
     }
 
-    function toggleSort(key) {
-      if (currentSort.key === key) {
-        currentSort.dir = currentSort.dir === 'asc' ? 'desc' : 'asc';
-      } else {
-        currentSort.key = key;
-        currentSort.dir = key === 'date' ? 'desc' : 'asc';
+    function findRow(folder) {
+      return rows.find((row) => row.folder === folder);
+    }
+
+    function openPreview(folder) {
+      const row = findRow(folder);
+      if (!row || !row.previewPath) return;
+      document.getElementById("preview-title").textContent = row.promptTitle || row.prompt;
+      document.getElementById("preview-link").href = row.previewPath;
+      document.getElementById("preview-frame").src = row.previewPath;
+      document.getElementById("preview-overlay").classList.add("active");
+    }
+
+    function closeOverlay(event, id) {
+      if (event && event.target !== event.currentTarget) return;
+      const overlay = document.getElementById(id);
+      overlay.classList.remove("active");
+      if (id === "preview-overlay") {
+        document.getElementById("preview-frame").src = "about:blank";
       }
-      applyFilters();
     }
 
-    function updateSortHeaders() {
-      document.querySelectorAll('th.sortable').forEach(function(th) {
-        th.classList.remove('sort-asc', 'sort-desc');
-        var k = th.getAttribute('data-sort');
-        if (k === currentSort.key) {
-          th.classList.add(currentSort.dir === 'asc' ? 'sort-asc' : 'sort-desc');
-          th.querySelector('.sort-arrow').textContent = currentSort.dir === 'asc' ? '↑' : '↓';
-        } else {
-          th.querySelector('.sort-arrow').textContent = '↕';
-        }
-      });
+    function showRunOutput(title, output) {
+      document.getElementById("run-title").textContent = title;
+      document.getElementById("run-output").textContent = output;
+      document.getElementById("run-overlay").classList.add("active");
     }
 
-    // Tooltip
-    var tip = document.getElementById('tooltip');
-    var activeInfoBtn = null;
-    function positionTooltip(el) {
-      var rect = el.getBoundingClientRect();
-      var tipW = tip.offsetWidth, tipH = tip.offsetHeight;
-      var left = rect.left + (rect.width / 2) - (tipW / 2);
-      var top = rect.bottom + 8;
-      if (left + tipW > window.innerWidth - 12) left = window.innerWidth - tipW - 12;
-      if (left < 8) left = 8;
-      if (top + tipH > window.innerHeight - 12) top = rect.top - tipH - 8;
-      tip.style.left = left + 'px';
-      tip.style.top = top + 'px';
+    async function runEval(folder, target = null) {
+      const buttonLabel = target ? \`\${folder} · \${target}\` : folder;
+      showRunOutput(\`Running \${buttonLabel}\`, "Running...");
+      const query = target ? \`?target=\${encodeURIComponent(target)}\` : "";
+      const response = await fetch(\`/run/\${encodeURIComponent(folder)}\${query}\`);
+      const payload = await response.json();
+      showRunOutput(\`Run output · \${buttonLabel}\`, payload.output || "(no output)");
     }
-    function showInfo(e, btn) {
-      if (e) e.stopPropagation();
-      var text = btn.getAttribute('data-info');
-      if (!text) return;
-      if (activeInfoBtn === btn && tip.classList.contains('visible')) {
-        hideInfo();
+
+    async function pickRunTarget(folder) {
+      const response = await fetch(\`/api/run-options/\${encodeURIComponent(folder)}\`);
+      const payload = await response.json();
+      if (!payload.ok) {
+        showRunOutput(\`Run options · \${folder}\`, "No runnable targets found.");
         return;
       }
-      activeInfoBtn = btn;
-      tip.textContent = text;
-      tip.classList.add('visible');
-      positionTooltip(btn);
-    }
-    function hideInfo() {
-      tip.classList.remove('visible');
-      activeInfoBtn = null;
-    }
-    document.addEventListener('click', function(e) {
-      if (!e.target.closest('.info-btn')) hideInfo();
-    });
-    window.addEventListener('resize', function() {
-      if (activeInfoBtn && tip.classList.contains('visible')) positionTooltip(activeInfoBtn);
-    });
-    document.addEventListener('mouseover', function(e) {
-      if (activeInfoBtn) return;
-      var el = e.target.closest('[data-tip]');
-      if (!el) { tip.classList.remove('visible'); return; }
-      var text = el.getAttribute('data-tip');
-      if (!text || text === el.textContent) { tip.classList.remove('visible'); return; }
-      tip.textContent = text;
-      tip.classList.add('visible');
-      var rect = el.getBoundingClientRect();
-      var tipW = tip.offsetWidth, tipH = tip.offsetHeight;
-      var left = rect.left;
-      var top = rect.bottom + 6;
-      if (left + tipW > window.innerWidth - 12) left = window.innerWidth - tipW - 12;
-      if (left < 8) left = 8;
-      if (top + tipH > window.innerHeight - 12) top = rect.top - tipH - 6;
-      tip.style.left = left + 'px';
-      tip.style.top = top + 'px';
-    });
-    document.addEventListener('mouseout', function(e) {
-      if (activeInfoBtn) return;
-      var el = e.target.closest('[data-tip]');
-      if (el) tip.classList.remove('visible');
-    });
 
-    // Preview modal
-    function openPreview(url, folder) {
-      document.getElementById('previewIframe').src = url;
-      document.getElementById('previewTitle').textContent = folder;
-      document.getElementById('previewOpenLink').href = url;
-      document.getElementById('previewOverlay').classList.add('active');
-      document.body.style.overflow = 'hidden';
-    }
-    function closePreview(e) {
-      if (e && e.target !== e.currentTarget) return;
-      document.getElementById('previewOverlay').classList.remove('active');
-      document.getElementById('previewIframe').src = 'about:blank';
-      document.body.style.overflow = '';
-    }
-
-    // Run script
-    async function chooseRunTarget(folder, runBtn) {
-      try {
-        var optionsRes = await fetch('/api/run-options/' + encodeURIComponent(folder) + '/');
-        var optionsData = await optionsRes.json();
-        if (!optionsRes.ok || !optionsData.targets || optionsData.targets.length === 0) {
-          alert('No runnable Python targets found for this folder.');
-          return;
-        }
-
-        var defaultIndex = optionsData.defaultTarget ? optionsData.targets.indexOf(optionsData.defaultTarget) + 1 : 1;
-        if (!defaultIndex || defaultIndex < 1) defaultIndex = 1;
-        var listText = optionsData.targets.map(function(target, index) {
-          return (index + 1) + '. ' + target;
-        }).join('\\n');
-        var answer = prompt(
-          'Choose a Python target to run for "' + folder + '":\\n\\n' + listText + '\\n\\nEnter number (' + defaultIndex + ' default):',
-          String(defaultIndex)
-        );
-        if (answer === null) return;
-
-        var trimmed = answer.trim();
-        var selectedNumber = Number.parseInt(trimmed === '' ? String(defaultIndex) : trimmed, 10);
-        if (!Number.isInteger(selectedNumber) || selectedNumber < 1 || selectedNumber > optionsData.targets.length) {
-          alert('Invalid selection.');
-          return;
-        }
-
-        await runScript(folder, runBtn, optionsData.targets[selectedNumber - 1]);
-      } catch (err) {
-        alert('Failed to load run options: ' + err.message);
+      const targets = Array.isArray(payload.targets) ? payload.targets : [];
+      if (targets.length <= 1) {
+        await runEval(folder, targets[0] || null);
+        return;
       }
+
+      const choice = window.prompt(
+        \`Choose a target for \${folder}:\\n\\n\${targets.map((target, index) => \`\${index + 1}. \${target}\`).join("\\n")}\`,
+        payload.defaultTarget || targets[0],
+      );
+      if (!choice) return;
+      await runEval(folder, choice.trim());
     }
 
-    async function runScript(folder, btn, target) {
-      btn.classList.add('running');
-      btn.textContent = 'Running…';
-      try {
-        var query = target ? ('?target=' + encodeURIComponent(target)) : '';
-        var res = await fetch('/run/' + encodeURIComponent(folder) + '/' + query);
-        var data = await res.json();
-        document.getElementById('runTitle').textContent = (data.ok ? '✓ ' : '✗ ') + folder;
-        document.getElementById('runOutput').textContent = data.output;
-        document.getElementById('runOverlay').classList.add('active');
-        document.body.style.overflow = 'hidden';
-      } catch (err) {
-        alert('Run failed: ' + err.message);
-      } finally {
-        btn.classList.remove('running');
-        btn.textContent = 'Run';
-      }
-    }
-    function closeRunOutput(e) {
-      if (e && e.target !== e.currentTarget) return;
-      document.getElementById('runOverlay').classList.remove('active');
-      document.body.style.overflow = '';
-    }
-
-    document.addEventListener('keydown', function(e) {
-      if (e.key === 'Escape') { closePreview(); closeRunOutput(); hideInfo(); }
-    });
-
-    // Initial render
-    renderRows();
-    updateSortHeaders();
+    applyFilters();
   </script>
 </body>
 </html>`;
-}
-
-function formatPercent(value: number): string {
-  if (!Number.isFinite(value)) {
-    return "0.0%";
-  }
-  return `${value.toFixed(1)}%`;
-}
-
-function formatDuration(totalSeconds: number): string {
-  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) {
-    return "0s";
-  }
-
-  const seconds = Math.floor(totalSeconds);
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const remaining = seconds % 60;
-
-  if (hours > 0) {
-    return `${hours}h ${minutes}m ${remaining}s`;
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${remaining}s`;
-  }
-  return `${remaining}s`;
-}
-
-function formatCost(costUsd: number | null): string {
-  if (costUsd === null || !Number.isFinite(costUsd)) {
-    return "N/A";
-  }
-  return `$${costUsd.toFixed(4)}`;
-}
-
-function formatDate(input: string): string {
-  const date = new Date(input);
-  if (Number.isNaN(date.getTime())) {
-    return input;
-  }
-  return date.toLocaleString();
 }
 
 function escapeHtml(value: string): string {
@@ -1170,4 +803,22 @@ function escapeHtml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function formatPercent(value: number): string {
+  return `${value.toFixed(1)}%`;
+}
+
+function formatDuration(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.round(totalSeconds));
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes > 0) {
+    return `${minutes}m ${remainder}s`;
+  }
+  return `${remainder}s`;
+}
+
+function formatCost(cost: number): string {
+  return `$${cost.toFixed(4)}`;
 }

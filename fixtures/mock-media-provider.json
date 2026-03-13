@@ -1,0 +1,30 @@
+{
+  "image": {
+    "default_model": "mock-image-v1",
+    "samples": [
+      {
+        "prompt": "Studio portrait with warm rim light",
+        "output_file": "portrait-studio.png",
+        "width": 1024,
+        "height": 1024
+      },
+      {
+        "prompt": "Isometric city builder screenshot",
+        "output_file": "city-builder.png",
+        "width": 1536,
+        "height": 1024
+      }
+    ]
+  },
+  "video": {
+    "default_model": "mock-video-v1",
+    "samples": [
+      {
+        "prompt": "Slow dolly through a neon alley",
+        "output_file": "neon-alley.mp4",
+        "duration_seconds": 6,
+        "fps": 24
+      }
+    ]
+  }
+}

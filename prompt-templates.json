@@ -1,0 +1,73 @@
+[
+  {
+    "name": "core-local",
+    "prompts": [
+      {
+        "prompt_id": "heart-curve-manim",
+        "prompt_number": 1
+      },
+      {
+        "prompt_id": "founder-match",
+        "prompt_number": 3
+      },
+      {
+        "prompt_id": "habit-roaster",
+        "prompt_number": 4
+      },
+      {
+        "prompt_id": "pokemon-guessing-game",
+        "prompt_number": 5
+      },
+      {
+        "prompt_id": "mock-media-cli",
+        "prompt_number": 6
+      },
+      {
+        "prompt_id": "interactive-pumpkin",
+        "prompt_number": 7
+      },
+      {
+        "prompt_id": "vision-file-renamer",
+        "prompt_number": 11
+      },
+      {
+        "prompt_id": "playable-ad-game",
+        "prompt_number": 13
+      }
+    ]
+  },
+  {
+    "name": "integration-fixture",
+    "prompts": [
+      {
+        "prompt_id": "notion-airtable-local",
+        "prompt_number": 2
+      },
+      {
+        "prompt_id": "developer-link-hub",
+        "prompt_number": 8
+      },
+      {
+        "prompt_id": "weekly-summary-task",
+        "prompt_number": 9
+      },
+      {
+        "prompt_id": "reference-post-rebuild",
+        "prompt_number": 14
+      }
+    ]
+  },
+  {
+    "name": "mobile",
+    "prompts": [
+      {
+        "prompt_id": "zodiac-gallery-mobile",
+        "prompt_number": 10
+      },
+      {
+        "prompt_id": "steampunk-pomodoro-mobile",
+        "prompt_number": 12
+      }
+    ]
+  }
+]

@@ -1,13 +1,11 @@
 package main
 
 import (
-	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,10 +24,11 @@ import (
 const (
 	defaultInactivityTimeout = 180 * time.Second
 	defaultTransientRetries  = 1
-	eventScannerMaxTokenSize = 8 * 1024 * 1024
 	basePort                 = 4096
 	ocCleanupPortScanCount   = 256
+	defaultModelID           = "opencode/kimi-k2.5-free"
 	promptsFile              = "prompts.json"
+	promptTemplatesFile      = "prompt-templates.json"
 	savedModelsFile          = "saved-models.json"
 )
 
@@ -40,12 +39,26 @@ var (
 )
 
 func newEscBackForm(groups ...*huh.Group) *huh.Form {
+	keymap := newFormKeyMap()
+	return huh.NewForm(groups...).WithKeyMap(keymap)
+}
+
+func newFormKeyMap() *huh.KeyMap {
 	keymap := huh.NewDefaultKeyMap()
 	keymap.Quit = key.NewBinding(
 		key.WithKeys("esc", "ctrl+c"),
 		key.WithHelp("esc", "back"),
 	)
-	return huh.NewForm(groups...).WithKeyMap(keymap)
+	keymap.MultiSelect.SelectAll = key.NewBinding(
+		key.WithKeys("A", "ctrl+a"),
+		key.WithHelp("A", "select all"),
+	)
+	keymap.MultiSelect.SelectNone = key.NewBinding(
+		key.WithKeys("A", "ctrl+a"),
+		key.WithHelp("A", "select none"),
+		key.WithDisabled(),
+	)
+	return keymap
 }
 
 func runFormWithBack(form *huh.Form) (aborted bool, err error) {
@@ -62,55 +75,67 @@ func runFormWithBack(form *huh.Form) (aborted bool, err error) {
 type EvalResult struct {
 	Prompt       string
 	PromptNumber int
+	PromptID     string
+	PromptTitle  string
+	Track        PromptTrack
+	AgentSuccess bool
+	Validation   ValidationReport
 	Folder       string
 	Success      bool
 	Error        string
 	Duration     time.Duration
 }
 
-type PromptJSON []string
-
-type Session struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Slug  string `json:"slug"`
+type PromptTemplate struct {
+	Name    string                `json:"name"`
+	Prompts []PromptTemplateEntry `json:"prompts"`
 }
 
-type Event struct {
-	Type       string                 `json:"type"`
-	Properties map[string]interface{} `json:"properties"`
+type sdkRunEvalRequest struct {
+	Title                    string `json:"title"`
+	Prompt                   string `json:"prompt"`
+	ProviderID               string `json:"providerID"`
+	ModelID                  string `json:"modelID"`
+	Hostname                 string `json:"hostname"`
+	Port                     int    `json:"port"`
+	InactivityTimeoutSeconds int    `json:"inactivityTimeoutSeconds"`
 }
 
-type Model struct {
-	ProviderID string `json:"providerID"`
-	ModelID    string `json:"modelID"`
-}
-
-type PromptPart struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-type PromptRequest struct {
-	Model Model        `json:"model"`
-	Parts []PromptPart `json:"parts"`
+type sdkRunEvalResponse struct {
+	Success     bool   `json:"success"`
+	SessionID   string `json:"sessionID"`
+	Error       string `json:"error"`
+	CompletedBy string `json:"completedBy"`
+	DurationMs  int64  `json:"durationMs"`
 }
 
 type EvalResultFile struct {
-	Prompt          string  `json:"prompt"`
-	PromptNumber    int     `json:"prompt_number,omitempty"`
-	Model           string  `json:"model"`
-	Success         bool    `json:"success"`
-	Error           string  `json:"error,omitempty"`
-	DurationSeconds int     `json:"duration_seconds"`
-	CompletedAt     string  `json:"completed_at"`
-	CostUSD         float64 `json:"cost_usd,omitempty"`
+	Prompt            string          `json:"prompt"`
+	PromptID          string          `json:"prompt_id,omitempty"`
+	PromptTitle       string          `json:"prompt_title,omitempty"`
+	PromptNumber      int             `json:"prompt_number,omitempty"`
+	Model             string          `json:"model"`
+	Track             PromptTrack     `json:"track,omitempty"`
+	Success           bool            `json:"success"`
+	AgentSuccess      bool            `json:"agent_success"`
+	ValidationSuccess bool            `json:"validation_success"`
+	Error             string          `json:"error,omitempty"`
+	DurationSeconds   int             `json:"duration_seconds"`
+	CompletedAt       string          `json:"completed_at"`
+	CostUSD           float64         `json:"cost_usd,omitempty"`
+	PreviewMode       PreviewMode     `json:"preview_mode,omitempty"`
+	RunMode           RunMode         `json:"run_mode,omitempty"`
+	Violations        []string        `json:"violations,omitempty"`
+	Checks            map[string]bool `json:"checks,omitempty"`
 }
 
 type EvalFolder struct {
 	Path         string
 	Prompt       string
+	PromptID     string
+	PromptTitle  string
 	PromptNumber int
+	Track        PromptTrack
 	Result       *EvalResultFile
 }
 
@@ -125,17 +150,13 @@ type ProvidersData struct {
 	Default   map[string]string `json:"default"`
 }
 
-type ProvidersResponse struct {
-	Data      ProvidersData     `json:"data"`
-	Providers []Provider        `json:"providers"`
-	Default   map[string]string `json:"default"`
-}
-
 type listeningProcess struct {
 	Command string
 	PID     int
 	Port    int
 }
+
+var runBunSDKCommand = defaultRunBunSDKCommand
 
 func main() {
 	if len(os.Args) < 2 {
@@ -150,6 +171,10 @@ func main() {
 		runCommand()
 	case "resume":
 		resumeCommand()
+	case "audit":
+		auditCommand(os.Args[2:])
+	case "templates":
+		templatesCommand(os.Args[2:])
 	case "models":
 		modelsCommand(os.Args[2:])
 	case "oc":
@@ -190,16 +215,23 @@ func interactiveMenu() {
 			savedCount = len(saved)
 		}
 
+		templateCount := 0
+		if templates, err := loadPromptTemplates(); err == nil {
+			templateCount = len(templates)
+		}
+
 		form := newEscBackForm(
 			huh.NewGroup(
 				huh.NewSelect[string]().
 					Title("High-Evals").
-					Description(fmt.Sprintf("%d prompt(s) · %d eval(s) · %d saved model(s)", promptCount, evalCount, savedCount)).
+					Description(fmt.Sprintf("%d prompt(s) · %d eval(s) · %d saved model(s) · %d template(s)", promptCount, evalCount, savedCount, templateCount)).
 					Options(
 						huh.NewOption("Run evals        select prompts and model, then run", "run"),
 						huh.NewOption("Resume evals     re-run previous evals from evals/", "resume"),
+						huh.NewOption("Audit evals      validate folders and refresh result metadata", "audit"),
 						huh.NewOption("OC cleanup       stop stale opencode sessions", "oc-cleanup"),
 						huh.NewOption("Manage models    browse, search and save models", "models"),
+						huh.NewOption("Templates        save named prompt subsets", "templates"),
 						huh.NewOption("List prompts     show all prompts in prompts.json", "list"),
 						huh.NewOption("Add prompt       create a new prompt", "add"),
 						huh.NewOption("Edit prompt      modify an existing prompt", "edit"),
@@ -230,10 +262,14 @@ func interactiveMenu() {
 			runCommand()
 		case "resume":
 			resumeCommand()
+		case "audit":
+			auditCommand(nil)
 		case "oc-cleanup":
 			ocCleanupCommand()
 		case "models":
 			interactiveModelsCommand()
+		case "templates":
+			interactiveTemplatesCommand()
 		case "list":
 			listCommand()
 		case "add":
@@ -257,6 +293,8 @@ Usage:
 Commands:
   run      Interactively select prompts and model, then run evals
   resume   Resume or re-run previous evals from the evals/ folder
+  audit    Validate eval folders and optionally refresh result metadata
+  templates Manage named prompt subsets stored in prompt-templates.json
   oc       OpenCode utilities (cleanup stale local sessions)
   models   Interactively browse and save models for reuse
   list     List all prompts in prompts.json
@@ -267,7 +305,11 @@ Commands:
 
 Examples:
   high-evals run
+  high-evals run -t quick-web -m openrouter/z-ai/glm-5
   high-evals resume
+  high-evals audit --write
+  high-evals templates
+  high-evals templates add
   high-evals oc cleanup
   high-evals models
   high-evals models list
@@ -278,6 +320,7 @@ Examples:
 
 Interactive shortcuts:
   Esc      Go back/cancel current screen
+  A        Select/deselect all in multi-select lists
   Ctrl+C   Quit`)
 }
 
@@ -594,33 +637,449 @@ func interactiveModelsCommand() {
 	fmt.Printf("Saved %d model(s) to %s.\n", added, savedModelsFile)
 }
 
-func loadPrompts() (PromptJSON, error) {
-	data, err := os.ReadFile(promptsFile)
+func loadPromptTemplates() ([]PromptTemplate, error) {
+	data, err := os.ReadFile(promptTemplatesFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return PromptJSON{}, nil
+			return []PromptTemplate{}, nil
 		}
 		return nil, err
 	}
 
 	if len(data) == 0 {
-		return PromptJSON{}, nil
+		return []PromptTemplate{}, nil
 	}
 
-	var prompts PromptJSON
-	if err := json.Unmarshal(data, &prompts); err != nil {
+	var templates []PromptTemplate
+	if err := json.Unmarshal(data, &templates); err != nil {
 		return nil, err
 	}
 
-	return prompts, nil
+	return templates, nil
 }
 
-func savePrompts(prompts PromptJSON) error {
-	data, err := json.MarshalIndent(prompts, "", "  ")
+func savePromptTemplates(templates []PromptTemplate) error {
+	sort.Slice(templates, func(i, j int) bool {
+		return strings.ToLower(strings.TrimSpace(templates[i].Name)) < strings.ToLower(strings.TrimSpace(templates[j].Name))
+	})
+
+	data, err := json.MarshalIndent(templates, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(promptsFile, data, 0644)
+	data = append(data, '\n')
+	return os.WriteFile(promptTemplatesFile, data, 0644)
+}
+
+func findPromptTemplateIndexByName(templates []PromptTemplate, name string) int {
+	trimmedName := strings.TrimSpace(name)
+	for i, template := range templates {
+		if strings.EqualFold(strings.TrimSpace(template.Name), trimmedName) {
+			return i
+		}
+	}
+	return -1
+}
+
+func buildPromptTemplateEntries(selectedIndices []int, prompts PromptJSON) []PromptTemplateEntry {
+	entries := make([]PromptTemplateEntry, 0, len(selectedIndices))
+	for _, idx := range selectedIndices {
+		if idx < 0 || idx >= len(prompts) {
+			continue
+		}
+		entries = append(entries, PromptTemplateEntry{
+			PromptID:     prompts[idx].ID,
+			PromptNumber: idx + 1,
+			PromptText:   prompts[idx].Prompt,
+		})
+	}
+	return entries
+}
+
+func buildPromptIndexByText(prompts PromptJSON) map[string]int {
+	lookup := make(map[string]int, len(prompts))
+	for i, prompt := range prompts {
+		if _, exists := lookup[prompt.Prompt]; exists {
+			continue
+		}
+		lookup[prompt.Prompt] = i
+	}
+	return lookup
+}
+
+func buildPromptIndexByID(prompts PromptJSON) map[string]int {
+	lookup := make(map[string]int, len(prompts))
+	for i, prompt := range prompts {
+		if prompt.ID == "" {
+			continue
+		}
+		if _, exists := lookup[prompt.ID]; exists {
+			continue
+		}
+		lookup[prompt.ID] = i
+	}
+	return lookup
+}
+
+func resolvePromptTemplate(name string, templates []PromptTemplate, prompts PromptJSON) (PromptTemplate, []int, error) {
+	templateIdx := findPromptTemplateIndexByName(templates, name)
+	if templateIdx == -1 {
+		return PromptTemplate{}, nil, fmt.Errorf("template %q not found", name)
+	}
+
+	template := templates[templateIdx]
+	if len(template.Prompts) == 0 {
+		return template, nil, fmt.Errorf("template %q has no prompts", template.Name)
+	}
+
+	promptIndexByText := buildPromptIndexByText(prompts)
+	promptIndexByID := buildPromptIndexByID(prompts)
+	selectedIndices := make([]int, 0, len(template.Prompts))
+	seen := make(map[int]struct{}, len(template.Prompts))
+
+	for _, entry := range template.Prompts {
+		resolvedIdx := -1
+
+		if entry.PromptID != "" {
+			if idx, ok := promptIndexByID[entry.PromptID]; ok {
+				resolvedIdx = idx
+			}
+		}
+
+		if resolvedIdx == -1 && entry.PromptText != "" {
+			if idx, ok := promptIndexByText[entry.PromptText]; ok {
+				resolvedIdx = idx
+			}
+		}
+
+		if resolvedIdx == -1 && entry.PromptNumber >= 1 && entry.PromptNumber <= len(prompts) {
+			resolvedIdx = entry.PromptNumber - 1
+		}
+
+		if resolvedIdx == -1 {
+			return template, nil, fmt.Errorf("template %q references a prompt that no longer exists", template.Name)
+		}
+
+		if _, exists := seen[resolvedIdx]; exists {
+			continue
+		}
+		seen[resolvedIdx] = struct{}{}
+		selectedIndices = append(selectedIndices, resolvedIdx)
+	}
+
+	if len(selectedIndices) == 0 {
+		return template, nil, fmt.Errorf("template %q has no valid prompts", template.Name)
+	}
+
+	return template, selectedIndices, nil
+}
+
+func templatePromptNumbers(template PromptTemplate) []int {
+	numbers := make([]int, 0, len(template.Prompts))
+	for _, entry := range template.Prompts {
+		if entry.PromptNumber > 0 {
+			numbers = append(numbers, entry.PromptNumber)
+		}
+	}
+	return numbers
+}
+
+func formatPromptNumberSummary(numbers []int) string {
+	if len(numbers) == 0 {
+		return "-"
+	}
+
+	parts := make([]string, len(numbers))
+	for i, number := range numbers {
+		parts[i] = fmt.Sprintf("p%d", number)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func buildPromptOptions(prompts PromptJSON, previewLimit int) []huh.Option[int] {
+	options := make([]huh.Option[int], len(prompts))
+	for i, prompt := range prompts {
+		options[i] = huh.NewOption(promptDisplayLabel(prompt, i, previewLimit), i)
+	}
+	return options
+}
+
+func templatesCommand(args []string) {
+	if len(args) == 0 {
+		interactiveTemplatesCommand()
+		return
+	}
+
+	switch args[0] {
+	case "list":
+		listTemplatesCommand()
+	case "add":
+		addTemplateCommand()
+	case "remove":
+		removeTemplateCommand(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown templates subcommand: %s\n", args[0])
+		fmt.Fprintln(os.Stderr, "Usage: high-evals templates [list|add|remove <name>]")
+		os.Exit(1)
+	}
+}
+
+func interactiveTemplatesCommand() {
+	for {
+		templates, err := loadPromptTemplates()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading templates: %v\n", err)
+			os.Exit(1)
+		}
+
+		var action string
+		form := newEscBackForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("Prompt templates").
+					Description(fmt.Sprintf("%d template(s) stored in %s", len(templates), promptTemplatesFile)).
+					Options(
+						huh.NewOption("List templates   show saved prompt subsets", "list"),
+						huh.NewOption("Add template     save a new named prompt subset", "add"),
+						huh.NewOption("Remove template  delete an existing template", "remove"),
+						huh.NewOption("Back", "back"),
+					).
+					Value(&action),
+			),
+		)
+
+		aborted, err := runFormWithBack(form)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if aborted || action == "back" {
+			return
+		}
+
+		fmt.Println()
+		switch action {
+		case "list":
+			listTemplatesCommand()
+		case "add":
+			addTemplateCommand()
+		case "remove":
+			removeTemplateCommand(nil)
+		}
+		fmt.Println()
+	}
+}
+
+func listTemplatesCommand() {
+	templates, err := loadPromptTemplates()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading templates: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(templates) == 0 {
+		fmt.Printf("No prompt templates found. Use 'high-evals templates add' to create one.\n")
+		return
+	}
+
+	fmt.Printf("Templates in %s:\n\n", promptTemplatesFile)
+	for i, template := range templates {
+		numbers := templatePromptNumbers(template)
+		fmt.Printf("  %d. %s (%d prompt(s): %s)\n", i+1, template.Name, len(template.Prompts), formatPromptNumberSummary(numbers))
+	}
+}
+
+func addTemplateCommand() {
+	prompts, err := loadPrompts()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading prompts: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(prompts) == 0 {
+		fmt.Println("No prompts found. Add prompts before creating a template.")
+		return
+	}
+
+	var selectedIndices []int
+	selectForm := newEscBackForm(
+		huh.NewGroup(
+			huh.NewMultiSelect[int]().
+				Title("Select prompts for the template").
+				Description("Choose the subset you want to re-run quickly. The template keeps this prompt order.").
+				Options(buildPromptOptions(prompts, 60)...).
+				Value(&selectedIndices).
+				Filterable(true),
+		),
+	)
+
+	aborted, err := runFormWithBack(selectForm)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if aborted {
+		return
+	}
+
+	if len(selectedIndices) == 0 {
+		fmt.Println("No prompts selected.")
+		return
+	}
+
+	var templateName string
+	nameForm := newEscBackForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Title("Template name").
+				Description("Example: quick-web, core-8, or regressions").
+				Placeholder("quick-web").
+				Value(&templateName),
+		),
+	)
+
+	aborted, err = runFormWithBack(nameForm)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if aborted {
+		return
+	}
+
+	templateName = strings.TrimSpace(templateName)
+	if templateName == "" {
+		fmt.Println("Template name cannot be empty.")
+		os.Exit(1)
+	}
+
+	templates, err := loadPromptTemplates()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading templates: %v\n", err)
+		os.Exit(1)
+	}
+
+	template := PromptTemplate{
+		Name:    templateName,
+		Prompts: buildPromptTemplateEntries(selectedIndices, prompts),
+	}
+
+	existingIdx := findPromptTemplateIndexByName(templates, templateName)
+	if existingIdx != -1 {
+		var overwrite bool
+		confirmForm := newEscBackForm(
+			huh.NewGroup(
+				huh.NewConfirm().
+					Title(fmt.Sprintf("Overwrite template %q?", templates[existingIdx].Name)).
+					Value(&overwrite),
+			),
+		)
+
+		aborted, err = runFormWithBack(confirmForm)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if aborted || !overwrite {
+			fmt.Println("Cancelled.")
+			return
+		}
+
+		templates[existingIdx] = template
+	} else {
+		templates = append(templates, template)
+	}
+
+	if err := savePromptTemplates(templates); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving templates: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Saved template %q with %d prompt(s) to %s.\n", template.Name, len(template.Prompts), promptTemplatesFile)
+}
+
+func removeTemplateCommand(args []string) {
+	templates, err := loadPromptTemplates()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading templates: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(templates) == 0 {
+		fmt.Println("No templates to remove.")
+		return
+	}
+
+	var templateName string
+	if len(args) > 0 {
+		templateName = strings.TrimSpace(args[0])
+	} else {
+		var selectedName string
+		options := make([]huh.Option[string], len(templates))
+		for i, template := range templates {
+			options[i] = huh.NewOption(
+				fmt.Sprintf("%s (%d prompt(s): %s)", template.Name, len(template.Prompts), formatPromptNumberSummary(templatePromptNumbers(template))),
+				template.Name,
+			)
+		}
+
+		form := newEscBackForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("Select a template to remove").
+					Options(options...).
+					Value(&selectedName),
+			),
+		)
+
+		aborted, err := runFormWithBack(form)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if aborted {
+			return
+		}
+
+		templateName = selectedName
+	}
+
+	templateIdx := findPromptTemplateIndexByName(templates, templateName)
+	if templateIdx == -1 {
+		fmt.Fprintf(os.Stderr, "Template not found: %s\n", templateName)
+		os.Exit(1)
+	}
+
+	var confirmRemove bool
+	confirmForm := newEscBackForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title(fmt.Sprintf("Remove template %q?", templates[templateIdx].Name)).
+				Value(&confirmRemove),
+		),
+	)
+
+	aborted, err := runFormWithBack(confirmForm)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if aborted {
+		return
+	}
+	if !confirmRemove {
+		fmt.Println("Cancelled.")
+		return
+	}
+
+	removedName := templates[templateIdx].Name
+	templates = append(templates[:templateIdx], templates[templateIdx+1:]...)
+	if err := savePromptTemplates(templates); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving templates: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Removed template %q.\n", removedName)
 }
 
 func listCommand() {
@@ -637,25 +1096,45 @@ func listCommand() {
 
 	fmt.Printf("Prompts in %s:\n\n", promptsFile)
 	for i, p := range prompts {
-		preview := p
-		if len(preview) > 80 {
-			preview = preview[:77] + "..."
-		}
-		fmt.Printf("  %d. %s\n", i+1, preview)
+		fmt.Printf("  %d. [%s] %s\n", i+1, p.Track, p.Title)
+		fmt.Printf("     %s\n", promptPreview(p.Prompt, 96))
 	}
 	fmt.Printf("\nTotal: %d prompt(s)\n", len(prompts))
 }
 
 func addCommand() {
-	var newPrompt string
+	var (
+		newTitle         string
+		newPrompt        string
+		newTrack         string
+		newDeterministic = true
+	)
 
 	form := newEscBackForm(
 		huh.NewGroup(
+			huh.NewInput().
+				Title("Prompt title").
+				Description("Short human-friendly label for the task").
+				Value(&newTitle),
+			huh.NewSelect[string]().
+				Title("Track").
+				Options(
+					huh.NewOption("Web", string(PromptTrackWeb)),
+					huh.NewOption("Python", string(PromptTrackPython)),
+					huh.NewOption("CLI", string(PromptTrackCLI)),
+					huh.NewOption("Integration", string(PromptTrackIntegration)),
+					huh.NewOption("Mobile", string(PromptTrackMobile)),
+				).
+				Value(&newTrack),
+			huh.NewConfirm().
+				Title("Deterministic / self-contained?").
+				Description("Headline comparisons only use deterministic non-mobile, non-integration prompts.").
+				Value(&newDeterministic),
 			huh.NewText().
 				Title("Enter the new prompt").
-				Description("Write a coding task for the agent to complete").
+				Description("Write the task body only. Shared runner instructions are injected automatically.").
 				Value(&newPrompt).
-				CharLimit(2000),
+				CharLimit(4000),
 		),
 	)
 
@@ -680,7 +1159,12 @@ func addCommand() {
 		os.Exit(1)
 	}
 
-	prompts = append(prompts, newPrompt)
+	prompts = append(prompts, PromptDefinition{
+		Title:         strings.TrimSpace(newTitle),
+		Prompt:        newPrompt,
+		Track:         normalizePromptTrack(PromptTrack(newTrack), newPrompt),
+		Deterministic: newDeterministic,
+	})
 
 	if err := savePrompts(prompts); err != nil {
 		fmt.Fprintf(os.Stderr, "Error saving prompts: %v\n", err)
@@ -705,11 +1189,7 @@ func editCommand() {
 	var selectedIdx int
 	options := make([]huh.Option[int], len(prompts))
 	for i, p := range prompts {
-		preview := p
-		if len(preview) > 60 {
-			preview = preview[:57] + "..."
-		}
-		options[i] = huh.NewOption(fmt.Sprintf("%d. %s", i+1, preview), i)
+		options[i] = huh.NewOption(promptDisplayLabel(p, i, 60), i)
 	}
 
 	selectForm := newEscBackForm(
@@ -731,13 +1211,30 @@ func editCommand() {
 	}
 
 	editedPrompt := prompts[selectedIdx]
+	editedTrack := string(editedPrompt.Track)
 
 	editForm := newEscBackForm(
 		huh.NewGroup(
+			huh.NewInput().
+				Title("Edit title").
+				Value(&editedPrompt.Title),
+			huh.NewSelect[string]().
+				Title("Edit track").
+				Options(
+					huh.NewOption("Web", string(PromptTrackWeb)),
+					huh.NewOption("Python", string(PromptTrackPython)),
+					huh.NewOption("CLI", string(PromptTrackCLI)),
+					huh.NewOption("Integration", string(PromptTrackIntegration)),
+					huh.NewOption("Mobile", string(PromptTrackMobile)),
+				).
+				Value(&editedTrack),
+			huh.NewConfirm().
+				Title("Deterministic / self-contained?").
+				Value(&editedPrompt.Deterministic),
 			huh.NewText().
 				Title("Edit the prompt").
-				Value(&editedPrompt).
-				CharLimit(2000),
+				Value(&editedPrompt.Prompt).
+				CharLimit(4000),
 		),
 	)
 
@@ -750,8 +1247,10 @@ func editCommand() {
 		return
 	}
 
-	editedPrompt = strings.TrimSpace(editedPrompt)
-	if editedPrompt == "" {
+	editedPrompt.Prompt = strings.TrimSpace(editedPrompt.Prompt)
+	editedPrompt.Title = strings.TrimSpace(editedPrompt.Title)
+	editedPrompt.Track = normalizePromptTrack(PromptTrack(editedTrack), editedPrompt.Prompt)
+	if editedPrompt.Prompt == "" {
 		fmt.Println("Prompt cannot be empty.")
 		os.Exit(1)
 	}
@@ -781,11 +1280,7 @@ func removeCommand() {
 	var selectedIdx int
 	options := make([]huh.Option[int], len(prompts))
 	for i, p := range prompts {
-		preview := p
-		if len(preview) > 60 {
-			preview = preview[:57] + "..."
-		}
-		options[i] = huh.NewOption(fmt.Sprintf("%d. %s", i+1, preview), i)
+		options[i] = huh.NewOption(promptDisplayLabel(p, i, 60), i)
 	}
 
 	form := newEscBackForm(
@@ -839,6 +1334,161 @@ func removeCommand() {
 	fmt.Printf("Removed prompt #%d\n", selectedIdx+1)
 }
 
+func parsePromptIndices(value string, promptCount int) ([]int, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, errors.New("prompt indices cannot be empty")
+	}
+
+	indices := make([]int, 0)
+	seen := make(map[int]struct{})
+
+	for _, raw := range strings.Split(value, ",") {
+		part := strings.TrimSpace(raw)
+		idx, err := strconv.Atoi(part)
+		if err != nil || idx < 1 || idx > promptCount {
+			return nil, fmt.Errorf("invalid prompt index: %s (must be 1-%d)", part, promptCount)
+		}
+
+		zeroBased := idx - 1
+		if _, exists := seen[zeroBased]; exists {
+			continue
+		}
+		seen[zeroBased] = struct{}{}
+		indices = append(indices, zeroBased)
+	}
+
+	return indices, nil
+}
+
+func normalizeRunMode(mode string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	switch normalized {
+	case "", "sequential":
+		return "sequential", nil
+	case "parallel":
+		return "parallel", nil
+	default:
+		return "", fmt.Errorf("invalid mode %q (expected parallel or sequential)", mode)
+	}
+}
+
+func promptForPromptIndices(prompts PromptJSON, title, description string) ([]int, bool, error) {
+	var selectedIndices []int
+	form := newEscBackForm(
+		huh.NewGroup(
+			huh.NewMultiSelect[int]().
+				Title(title).
+				Description(description).
+				Options(buildPromptOptions(prompts, 60)...).
+				Value(&selectedIndices).
+				Filterable(true),
+		),
+	)
+
+	aborted, err := runFormWithBack(form)
+	if err != nil {
+		return nil, false, err
+	}
+	if aborted {
+		return nil, true, nil
+	}
+
+	return selectedIndices, false, nil
+}
+
+func selectRunPromptIndices(prompts PromptJSON, templates []PromptTemplate) ([]int, string, bool, error) {
+	if len(templates) == 0 {
+		selectedIndices, aborted, err := promptForPromptIndices(prompts, "Select prompts to run", "Choose one or more prompts from prompts.json")
+		return selectedIndices, "", aborted, err
+	}
+
+	var promptSource string
+	sourceForm := newEscBackForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Prompt source").
+				Description("Run a manual prompt selection or a saved template").
+				Options(
+					huh.NewOption("Manual selection", "manual"),
+					huh.NewOption("Saved template", "template"),
+				).
+				Value(&promptSource),
+		),
+	)
+
+	aborted, err := runFormWithBack(sourceForm)
+	if err != nil {
+		return nil, "", false, err
+	}
+	if aborted {
+		return nil, "", true, nil
+	}
+
+	if promptSource != "template" {
+		selectedIndices, aborted, err := promptForPromptIndices(prompts, "Select prompts to run", "Choose one or more prompts from prompts.json")
+		return selectedIndices, "", aborted, err
+	}
+
+	options := make([]huh.Option[string], len(templates))
+	for i, template := range templates {
+		options[i] = huh.NewOption(
+			fmt.Sprintf("%s (%d prompt(s): %s)", template.Name, len(template.Prompts), formatPromptNumberSummary(templatePromptNumbers(template))),
+			template.Name,
+		)
+	}
+
+	var selectedTemplateName string
+	templateForm := newEscBackForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Select a template").
+				Description("Templates are loaded from prompt-templates.json").
+				Options(options...).
+				Value(&selectedTemplateName),
+		),
+	)
+
+	aborted, err = runFormWithBack(templateForm)
+	if err != nil {
+		return nil, "", false, err
+	}
+	if aborted {
+		return nil, "", true, nil
+	}
+
+	template, selectedIndices, err := resolvePromptTemplate(selectedTemplateName, templates, prompts)
+	if err != nil {
+		return nil, "", false, err
+	}
+
+	return selectedIndices, template.Name, false, nil
+}
+
+func promptForRunMode() (string, bool, error) {
+	var runMode string
+	form := newEscBackForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Execution mode").
+				Options(
+					huh.NewOption("Parallel (run all at once)", "parallel"),
+					huh.NewOption("Sequential (run one at a time)", "sequential"),
+				).
+				Value(&runMode),
+		),
+	)
+
+	aborted, err := runFormWithBack(form)
+	if err != nil {
+		return "", false, err
+	}
+	if aborted {
+		return "", true, nil
+	}
+
+	return runMode, false, nil
+}
+
 func runCommand() {
 	prompts, err := loadPrompts()
 	if err != nil {
@@ -855,6 +1505,7 @@ func runCommand() {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	flagModel := fs.String("m", "", "Model to use (e.g. opencode/kimi-k2.5-free)")
 	flagPrompts := fs.String("p", "", "Comma-separated 1-based prompt indices (e.g. 1,3,5)")
+	flagTemplate := fs.String("t", "", "Prompt template name from prompt-templates.json")
 	flagMode := fs.String("mode", "sequential", "Execution mode: parallel or sequential")
 	flagInactivityTimeout := fs.Int("inactivity-timeout", int(defaultInactivityTimeout.Seconds()), "Inactivity timeout in seconds before failing a run")
 	flagRetries := fs.Int("retries", defaultTransientRetries, "Retries for transient failures (timeout/stream errors)")
@@ -864,53 +1515,53 @@ func runCommand() {
 	applyRuntimeOptions(*flagInactivityTimeout, *flagRetries)
 
 	var selectedIndices []int
+	var selectedTemplateName string
 	var modelStr string
 	var runMode string
 
-	if *flagModel != "" && *flagPrompts != "" {
-		// Non-interactive mode
-		modelStr = *flagModel
-		runMode = *flagMode
-		for _, s := range strings.Split(*flagPrompts, ",") {
-			s = strings.TrimSpace(s)
-			idx, err := strconv.Atoi(s)
-			if err != nil || idx < 1 || idx > len(prompts) {
-				fmt.Fprintf(os.Stderr, "Invalid prompt index: %s (must be 1-%d)\n", s, len(prompts))
-				os.Exit(1)
-			}
-			selectedIndices = append(selectedIndices, idx-1)
+	if strings.TrimSpace(*flagPrompts) != "" && strings.TrimSpace(*flagTemplate) != "" {
+		fmt.Fprintln(os.Stderr, "Use either -p or -t, not both.")
+		os.Exit(1)
+	}
+
+	runMode, err = normalizeRunMode(*flagMode)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if strings.TrimSpace(*flagPrompts) != "" {
+		selectedIndices, err = parsePromptIndices(*flagPrompts, len(prompts))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
+		modelStr = strings.TrimSpace(*flagModel)
+	} else if strings.TrimSpace(*flagTemplate) != "" {
+		templates, err := loadPromptTemplates()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading templates: %v\n", err)
+			os.Exit(1)
+		}
+
+		template, resolvedIndices, err := resolvePromptTemplate(*flagTemplate, templates, prompts)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		selectedTemplateName = template.Name
+		selectedIndices = resolvedIndices
+		modelStr = strings.TrimSpace(*flagModel)
 	} else {
-		// Interactive mode
-		promptOptions := make([]huh.Option[int], len(prompts))
-		for i, p := range prompts {
-			preview := p
-			if len(preview) > 60 {
-				preview = preview[:57] + "..."
-			}
-			promptOptions[i] = huh.NewOption(fmt.Sprintf("%d. %s", i+1, preview), i)
+		templates, err := loadPromptTemplates()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading templates: %v\n", err)
+			os.Exit(1)
 		}
 
-		form := newEscBackForm(
-			huh.NewGroup(
-				huh.NewMultiSelect[int]().
-					Title("Select prompts to run").
-					Options(promptOptions...).
-					Value(&selectedIndices).
-					Filterable(true),
-			),
-			huh.NewGroup(
-				huh.NewSelect[string]().
-					Title("Execution mode").
-					Options(
-						huh.NewOption("Parallel (run all at once)", "parallel"),
-						huh.NewOption("Sequential (run one at a time)", "sequential"),
-					).
-					Value(&runMode),
-			),
-		)
-
-		aborted, err := runFormWithBack(form)
+		var aborted bool
+		selectedIndices, selectedTemplateName, aborted, err = selectRunPromptIndices(prompts, templates)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -924,25 +1575,48 @@ func runCommand() {
 			return
 		}
 
+		runMode, aborted, err = promptForRunMode()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if aborted {
+			return
+		}
+	}
+
+	if len(selectedIndices) == 0 {
+		fmt.Println("No prompts selected.")
+		return
+	}
+
+	if strings.TrimSpace(modelStr) == "" {
 		var modelSelectionAborted bool
-		modelStr, modelSelectionAborted = promptModelSelector("Select or type a model ID")
+		modelStr, modelSelectionAborted = promptModelSelector("Select or type a model ID", false)
 		if modelSelectionAborted {
 			return
 		}
-		if modelStr == "" {
-			modelStr = "opencode/kimi-k2.5-free"
-		}
+	}
+	if modelStr == "" {
+		modelStr = defaultModelID
 	}
 
 	tasks := make([]EvalTask, len(selectedIndices))
 	for i, idx := range selectedIndices {
+		definition := prompts[idx]
 		tasks[i] = EvalTask{
-			Prompt:       prompts[idx],
+			Definition:   &definition,
+			PromptID:     definition.ID,
+			PromptTitle:  definition.Title,
+			Track:        definition.Track,
 			PromptNumber: idx + 1,
 		}
 	}
 
 	fmt.Printf("\nStarting %d eval(s) with model: %s\n", len(tasks), modelStr)
+	if selectedTemplateName != "" {
+		fmt.Printf("Template: %s\n", selectedTemplateName)
+	}
 	fmt.Printf("Mode: %s\n", runMode)
 	fmt.Printf("Inactivity timeout: %ds · transient retries: %d\n", int(inactivityTimeout.Seconds()), transientRetries)
 	fmt.Println(strings.Repeat("─", 50))
@@ -964,8 +1638,17 @@ func runCommand() {
 			status = "✗"
 		}
 		fmt.Printf("%s [%ds] %s\n", status, int(result.Duration.Seconds()), result.Folder)
+		if !result.AgentSuccess {
+			fmt.Printf("  Agent: failed\n")
+		} else {
+			fmt.Printf("  Agent: ok\n")
+		}
+		fmt.Printf("  Validation: %t (%s / %s)\n", result.Validation.ValidationSuccess(), result.Validation.RunMode, result.Validation.PreviewMode)
 		if result.Error != "" {
 			fmt.Printf("  Error: %s\n", result.Error)
+		}
+		if len(result.Validation.Violations) > 0 {
+			fmt.Printf("  Violations: %s\n", strings.Join(result.Validation.Violations, "; "))
 		}
 	}
 
@@ -1026,7 +1709,6 @@ func resumeCommand() {
 	}
 
 	var selectedIndices []int
-	var modelStr string
 	var runMode string
 
 	form := newEscBackForm(
@@ -1037,15 +1719,6 @@ func resumeCommand() {
 				Options(options...).
 				Value(&selectedIndices).
 				Filterable(true),
-		),
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Execution mode").
-				Options(
-					huh.NewOption("Parallel (run all at once)", "parallel"),
-					huh.NewOption("Sequential (run one at a time)", "sequential"),
-				).
-				Value(&runMode),
 		),
 	)
 
@@ -1063,46 +1736,28 @@ func resumeCommand() {
 		return
 	}
 
-	var modelSelectionAborted bool
-	modelStr, modelSelectionAborted = promptModelSelector("Select a model, or leave empty to re-use original")
-	if modelSelectionAborted {
+	runMode, aborted, err = promptForRunMode()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if aborted {
 		return
 	}
-	// modelStr may be empty — handled below per-eval
 
-	tasks := make([]EvalTask, len(selectedIndices))
-	for i, idx := range selectedIndices {
-		ef := folders[idx]
-		tasks[i] = EvalTask{
-			Prompt:       ef.Prompt,
-			PromptNumber: ef.PromptNumber,
-			Folder:       ef.Path,
-		}
+	tasks := buildResumeTasks(folders, selectedIndices, "")
 
-		if modelStr == "" && ef.Result != nil && ef.Result.Model != "" {
-			if i == 0 {
-				modelStr = ef.Result.Model
-			}
-		}
-	}
-
-	if modelStr == "" {
-		modelStr = "opencode/kimi-k2.5-free"
-	}
-
-	// If user set a model, use it for all. If not, we already picked one above.
-	// For per-eval model tracking, the model is saved in result.json per folder.
-
-	fmt.Printf("\nResuming %d eval(s) with model: %s\n", len(tasks), modelStr)
+	fmt.Printf("\nResuming %d eval(s)\n", len(tasks))
+	fmt.Printf("Model selection: stored per eval (fallback: %s)\n", defaultModelID)
 	fmt.Printf("Mode: %s\n", runMode)
 	fmt.Printf("Inactivity timeout: %ds · transient retries: %d\n", int(inactivityTimeout.Seconds()), transientRetries)
 	fmt.Println(strings.Repeat("─", 50))
 
 	var results []EvalResult
 	if runMode == "parallel" {
-		results = runAllEvalsParallel(tasks, modelStr)
+		results = runAllEvalsParallel(tasks, defaultModelID)
 	} else {
-		results = runAllEvalsSequential(tasks, modelStr)
+		results = runAllEvalsSequential(tasks, defaultModelID)
 	}
 
 	fmt.Printf("\n%s\n", strings.Repeat("═", 50))
@@ -1115,8 +1770,17 @@ func resumeCommand() {
 			status = "✗"
 		}
 		fmt.Printf("%s [%ds] %s\n", status, int(result.Duration.Seconds()), result.Folder)
+		if !result.AgentSuccess {
+			fmt.Printf("  Agent: failed\n")
+		} else {
+			fmt.Printf("  Agent: ok\n")
+		}
+		fmt.Printf("  Validation: %t (%s / %s)\n", result.Validation.ValidationSuccess(), result.Validation.RunMode, result.Validation.PreviewMode)
 		if result.Error != "" {
 			fmt.Printf("  Error: %s\n", result.Error)
+		}
+		if len(result.Validation.Violations) > 0 {
+			fmt.Printf("  Violations: %s\n", strings.Join(result.Validation.Violations, "; "))
 		}
 	}
 
@@ -1129,72 +1793,101 @@ func resumeCommand() {
 	fmt.Printf("\n%d/%d evals completed successfully\n", successful, len(results))
 }
 
-func fetchProviders(client *http.Client, baseURL string) (ProvidersData, error) {
-	resp, err := client.Get(baseURL + "/config/providers")
+func opencodeSDKScriptPath() (string, error) {
+	return filepath.Abs(filepath.Join("scripts", "opencode-sdk.ts"))
+}
+
+func defaultRunBunSDKCommand(dir string, args []string, input []byte) ([]byte, []byte, error) {
+	scriptPath, err := opencodeSDKScriptPath()
 	if err != nil {
-		return ProvidersData{}, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return ProvidersData{}, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, nil, err
 	}
 
-	var payload ProvidersResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return ProvidersData{}, err
+	commandArgs := append([]string{scriptPath}, args...)
+	cmd := exec.Command("bun", commandArgs...)
+	cmd.Dir = dir
+	if len(input) > 0 {
+		cmd.Stdin = bytes.NewReader(input)
 	}
 
-	if len(payload.Data.Providers) > 0 || len(payload.Data.Default) > 0 {
-		return payload.Data, nil
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func parseBunSDKJSONOutput(stdout []byte, output interface{}) error {
+	trimmed := bytes.TrimSpace(stdout)
+	if len(trimmed) == 0 {
+		return errors.New("empty JSON output from Bun SDK helper")
 	}
 
-	return ProvidersData{
-		Providers: payload.Providers,
-		Default:   payload.Default,
-	}, nil
+	if err := json.Unmarshal(trimmed, output); err != nil {
+		return fmt.Errorf("parsing Bun SDK helper output: %w (output: %s)", err, string(trimmed))
+	}
+
+	return nil
+}
+
+func formatBunSDKCommandError(err error, stdout, stderr []byte) error {
+	stderrText := strings.TrimSpace(string(stderr))
+	stdoutText := strings.TrimSpace(string(stdout))
+
+	switch {
+	case stderrText != "":
+		return fmt.Errorf("%w: %s", err, stderrText)
+	case stdoutText != "":
+		return fmt.Errorf("%w: %s", err, stdoutText)
+	default:
+		return err
+	}
+}
+
+func runBunSDKJSONHelper(dir string, args []string, input interface{}, output interface{}) error {
+	var body []byte
+	if input != nil {
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			return fmt.Errorf("encoding Bun SDK input: %w", err)
+		}
+		body = encoded
+	}
+
+	stdout, stderr, err := runBunSDKCommand(dir, args, body)
+	if err != nil {
+		return formatBunSDKCommandError(err, stdout, stderr)
+	}
+
+	if output == nil {
+		return nil
+	}
+
+	return parseBunSDKJSONOutput(stdout, output)
+}
+
+func runEvalWithBunSDK(folderPath string, request sdkRunEvalRequest) (sdkRunEvalResponse, error) {
+	var response sdkRunEvalResponse
+	if err := runBunSDKJSONHelper(folderPath, []string{"run-eval"}, request, &response); err != nil {
+		return sdkRunEvalResponse{}, err
+	}
+	return response, nil
 }
 
 func getProvidersData() (ProvidersData, error) {
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d", basePort)
-	client := &http.Client{Timeout: 10 * time.Second}
-
-	providersData, err := fetchProviders(client, baseURL)
-	if err == nil {
-		return providersData, nil
-	}
-
-	fmt.Printf("No opencode server detected on %s. Starting a temporary server...\n", baseURL)
-
-	cmd := exec.Command("opencode", "--port", fmt.Sprintf("%d", basePort))
-	cmd.Dir = "."
-	if err := cmd.Start(); err != nil {
-		return ProvidersData{}, fmt.Errorf("starting opencode: %w", err)
-	}
-	defer cmd.Process.Kill()
-
-	if err := waitForProvidersEndpoint(client, baseURL, 5*time.Second); err != nil {
-		return ProvidersData{}, fmt.Errorf("waiting for opencode server: %w", err)
-	}
-
-	providersData, err = fetchProviders(client, baseURL)
+	var providersData ProvidersData
+	err := runBunSDKJSONHelper(
+		".",
+		[]string{"providers", "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", basePort)},
+		nil,
+		&providersData,
+	)
 	if err != nil {
 		return ProvidersData{}, err
 	}
-
 	return providersData, nil
-}
-
-func waitForProvidersEndpoint(client *http.Client, baseURL string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if _, err := fetchProviders(client, baseURL); err == nil {
-			return nil
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	return fmt.Errorf("timed out after %s", timeout)
 }
 
 func printProviders(data ProvidersData, savedSet map[string]struct{}) {
@@ -1805,10 +2498,29 @@ func buildPromptNumberByPrompt() map[string]int {
 
 	m := make(map[string]int, len(prompts))
 	for i, p := range prompts {
-		if _, exists := m[p]; exists {
+		if _, exists := m[p.Prompt]; exists {
 			continue
 		}
-		m[p] = i + 1
+		m[p.Prompt] = i + 1
+	}
+	return m
+}
+
+func buildPromptNumberByID() map[string]int {
+	prompts, err := loadPrompts()
+	if err != nil || len(prompts) == 0 {
+		return map[string]int{}
+	}
+
+	m := make(map[string]int, len(prompts))
+	for i, prompt := range prompts {
+		if prompt.ID == "" {
+			continue
+		}
+		if _, exists := m[prompt.ID]; exists {
+			continue
+		}
+		m[prompt.ID] = i + 1
 	}
 	return m
 }
@@ -1837,13 +2549,22 @@ func setupEvalFolder(folderPath, prompt string) error {
 
 func saveEvalResult(folderPath string, result EvalResult, model string) {
 	rf := EvalResultFile{
-		Prompt:          result.Prompt,
-		PromptNumber:    result.PromptNumber,
-		Model:           model,
-		Success:         result.Success,
-		Error:           result.Error,
-		DurationSeconds: int(result.Duration.Seconds()),
-		CompletedAt:     time.Now().Format(time.RFC3339),
+		Prompt:            result.Prompt,
+		PromptID:          result.PromptID,
+		PromptTitle:       result.PromptTitle,
+		PromptNumber:      result.PromptNumber,
+		Model:             model,
+		Track:             result.Track,
+		Success:           result.Success,
+		AgentSuccess:      result.AgentSuccess,
+		ValidationSuccess: result.Validation.ValidationSuccess(),
+		Error:             result.Error,
+		DurationSeconds:   int(result.Duration.Seconds()),
+		CompletedAt:       time.Now().Format(time.RFC3339),
+		PreviewMode:       result.Validation.PreviewMode,
+		RunMode:           result.Validation.RunMode,
+		Violations:        cloneStringSlice(result.Validation.Violations),
+		Checks:            cloneBoolMap(result.Validation.Checks),
 	}
 	data, err := json.MarshalIndent(rf, "", "  ")
 	if err != nil {
@@ -1862,6 +2583,7 @@ func scanEvalFolders() ([]EvalFolder, error) {
 	}
 
 	promptNumberByText := buildPromptNumberByPrompt()
+	promptNumberByID := buildPromptNumberByID()
 	var folders []EvalFolder
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -1884,9 +2606,17 @@ func scanEvalFolders() ([]EvalFolder, error) {
 			var rf EvalResultFile
 			if json.Unmarshal(resultData, &rf) == nil {
 				ef.Result = &rf
+				ef.PromptID = rf.PromptID
+				ef.PromptTitle = rf.PromptTitle
+				ef.Track = rf.Track
 				if rf.PromptNumber > 0 {
 					ef.PromptNumber = rf.PromptNumber
 				}
+			}
+		}
+		if ef.PromptNumber == 0 && ef.PromptID != "" {
+			if n, ok := promptNumberByID[ef.PromptID]; ok {
+				ef.PromptNumber = n
 			}
 		}
 		if ef.PromptNumber == 0 {
@@ -1905,9 +2635,56 @@ func scanEvalFolders() ([]EvalFolder, error) {
 }
 
 type EvalTask struct {
+	Definition   *PromptDefinition
 	Prompt       string
+	PromptID     string
+	PromptTitle  string
+	Track        PromptTrack
 	PromptNumber int
 	Folder       string // empty = create new folder
+	Model        string
+}
+
+func buildResumeTasks(folders []EvalFolder, selectedIndices []int, overrideModel string) []EvalTask {
+	tasks := make([]EvalTask, len(selectedIndices))
+	trimmedOverride := strings.TrimSpace(overrideModel)
+
+	for i, idx := range selectedIndices {
+		ef := folders[idx]
+		taskModel := trimmedOverride
+		if taskModel == "" && ef.Result != nil {
+			taskModel = strings.TrimSpace(ef.Result.Model)
+		}
+
+		tasks[i] = EvalTask{
+			Prompt:       ef.Prompt,
+			PromptID:     ef.PromptID,
+			PromptTitle:  ef.PromptTitle,
+			Track:        ef.Track,
+			PromptNumber: ef.PromptNumber,
+			Folder:       ef.Path,
+			Model:        taskModel,
+		}
+	}
+
+	return tasks
+}
+
+func resolveTaskModel(task EvalTask, fallbackModel string) string {
+	if strings.TrimSpace(task.Model) != "" {
+		return strings.TrimSpace(task.Model)
+	}
+	return fallbackModel
+}
+
+func resolveTaskTrack(task EvalTask) PromptTrack {
+	if task.Definition != nil {
+		return normalizePromptTrack(task.Definition.Track, task.Definition.Prompt)
+	}
+	if task.Track != "" {
+		return normalizePromptTrack(task.Track, task.Prompt)
+	}
+	return inferPromptTrack(task.Prompt)
 }
 
 func runAllEvalsParallel(tasks []EvalTask, model string) []EvalResult {
@@ -1919,7 +2696,7 @@ func runAllEvalsParallel(tasks []EvalTask, model string) []EvalResult {
 		wg.Add(1)
 		go func(index int, t EvalTask) {
 			defer wg.Done()
-			result := runAgentWithRetry(t.Prompt, t.PromptNumber, index, model, t.Folder)
+			result := runAgentWithRetry(t, index, resolveTaskModel(t, model))
 			resultMutex.Lock()
 			results[index] = result
 			resultMutex.Unlock()
@@ -1932,37 +2709,42 @@ func runAllEvalsParallel(tasks []EvalTask, model string) []EvalResult {
 
 func runAllEvalsSequential(tasks []EvalTask, model string) []EvalResult {
 	results := make([]EvalResult, len(tasks))
-	currentModel := model
+	defaultModel := model
 
 	for i, task := range tasks {
-		results[i] = runAgentWithRetry(task.Prompt, task.PromptNumber, i, currentModel, task.Folder)
+		taskModel := resolveTaskModel(task, defaultModel)
+		results[i] = runAgentWithRetry(task, i, taskModel)
 
 		// On model-not-found, prompt user to correct and re-run this eval
 		if !results[i].Success {
 			isModelErr, suggestions := isModelNotFoundError(results[i].Error)
 			if isModelErr {
-				fmt.Printf("\n[%d] Model not found: %s\n", i, currentModel)
-				corrected, correctionAborted := promptModelCorrection(currentModel, suggestions)
+				fmt.Printf("\n[%d] Model not found: %s\n", i, taskModel)
+				corrected, correctionAborted := promptModelCorrection(taskModel, suggestions)
 				if correctionAborted || corrected == "" {
 					fmt.Println("No model selected, aborting remaining evals.")
 					return results
 				}
-				currentModel = corrected
-				fmt.Printf("[%d] Retrying with model: %s\n", i, currentModel)
-				results[i] = runAgentWithRetry(task.Prompt, task.PromptNumber, i, currentModel, task.Folder)
+				if strings.TrimSpace(task.Model) == "" {
+					defaultModel = corrected
+				} else {
+					taskModel = corrected
+				}
+				fmt.Printf("[%d] Retrying with model: %s\n", i, corrected)
+				results[i] = runAgentWithRetry(task, i, corrected)
 			}
 		}
 	}
 	return results
 }
 
-func runAgentWithRetry(prompt string, promptNumber, index int, modelStr string, existingFolder string) EvalResult {
+func runAgentWithRetry(task EvalTask, index int, modelStr string) EvalResult {
 	maxAttempts := transientRetries + 1
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
 
-	folder := existingFolder
+	folder := task.Folder
 	var result EvalResult
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -1970,7 +2752,8 @@ func runAgentWithRetry(prompt string, promptNumber, index int, modelStr string, 
 			fmt.Printf("[%d] Retry attempt %d/%d after transient failure\n", index, attempt-1, transientRetries)
 		}
 
-		result = runAgent(prompt, promptNumber, index, modelStr, folder)
+		task.Folder = folder
+		result = runAgent(task, index, modelStr)
 		folder = result.Folder
 
 		if result.Success || !isTransientEvalError(result.Error) || attempt == maxAttempts {
@@ -1981,28 +2764,40 @@ func runAgentWithRetry(prompt string, promptNumber, index int, modelStr string, 
 	return result
 }
 
-func runAgent(prompt string, promptNumber, index int, modelStr string, existingFolder string) EvalResult {
+func runAgent(task EvalTask, index int, modelStr string) EvalResult {
 	startTime := time.Now()
 
-	folderPath := existingFolder
+	folderPath := task.Folder
 	if folderPath == "" {
-		folderPath = createTimestampFolder(index, promptNumber, modelStr)
-	} else if promptNumber < 1 {
-		promptNumber = parsePromptNumberFromFolder(filepath.Base(folderPath))
+		folderPath = createTimestampFolder(index, task.PromptNumber, modelStr)
+	} else if task.PromptNumber < 1 {
+		task.PromptNumber = parsePromptNumberFromFolder(filepath.Base(folderPath))
 	}
 
 	fmt.Printf("[%d] Starting eval in %s\n", index, folderPath)
 
+	renderedPrompt := task.Prompt
+	if strings.TrimSpace(renderedPrompt) == "" && task.Definition != nil {
+		renderedPrompt = renderPrompt(*task.Definition, modelStr, folderPath)
+	}
+
 	result := EvalResult{
-		Prompt:       prompt,
-		PromptNumber: promptNumber,
+		Prompt:       renderedPrompt,
+		PromptID:     task.PromptID,
+		PromptTitle:  task.PromptTitle,
+		Track:        resolveTaskTrack(task),
+		PromptNumber: task.PromptNumber,
 		Folder:       folderPath,
 		Success:      false,
 		Duration:     0,
+		Validation: ValidationReport{
+			Track:   resolveTaskTrack(task),
+			RunMode: detectRunMode(folderPath, resolveTaskTrack(task)),
+		},
 	}
 
-	if existingFolder == "" {
-		if err := setupEvalFolder(folderPath, prompt); err != nil {
+	if task.Folder == "" {
+		if err := setupEvalFolder(folderPath, renderedPrompt); err != nil {
 			result.Error = fmt.Sprintf("Failed to setup folder: %v", err)
 			result.Duration = time.Since(startTime)
 			saveEvalResult(folderPath, result, modelStr)
@@ -2012,289 +2807,53 @@ func runAgent(prompt string, promptNumber, index int, modelStr string, existingF
 
 	port := basePort + index
 	providerID, modelID := parseModel(modelStr)
+	fmt.Printf("[%d] Sending prompt via Bun SDK...\n", index)
 
-	cmd := exec.Command("opencode", "--port", fmt.Sprintf("%d", port))
-	cmd.Dir = folderPath
-	if err := cmd.Start(); err != nil {
-		result.Error = fmt.Sprintf("Failed to start opencode: %v", err)
-		result.Duration = time.Since(startTime)
-		saveEvalResult(folderPath, result, modelStr)
-		return result
-	}
-	defer cmd.Process.Kill()
-
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	client := &http.Client{Timeout: 10 * time.Second}
-
-	// Wait for server to be ready by polling session creation
-	var session *Session
-	var sessionErr error
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		session, sessionErr = createSession(client, baseURL, fmt.Sprintf("Eval %d", index))
-		if sessionErr == nil {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	if session == nil {
-		result.Error = fmt.Sprintf("Server not ready after 15s: %v", sessionErr)
-		result.Duration = time.Since(startTime)
-		saveEvalResult(folderPath, result, modelStr)
-		return result
-	}
-
-	fmt.Printf("[%d] Session created: %s\n", index, session.ID)
-
-	// Subscribe to SSE events BEFORE sending the prompt to avoid race condition
-	eventResp, err := http.Get(baseURL + "/event")
+	sdkResult, err := runEvalWithBunSDK(folderPath, sdkRunEvalRequest{
+		Title:                    fmt.Sprintf("Eval %d", index),
+		Prompt:                   renderedPrompt,
+		ProviderID:               providerID,
+		ModelID:                  modelID,
+		Hostname:                 "127.0.0.1",
+		Port:                     port,
+		InactivityTimeoutSeconds: int(inactivityTimeout.Seconds()),
+	})
 	if err != nil {
-		result.Error = fmt.Sprintf("Failed to subscribe to events: %v", err)
-		result.Duration = time.Since(startTime)
-		saveEvalResult(folderPath, result, modelStr)
-		return result
-	}
-	defer eventResp.Body.Close()
-
-	fmt.Printf("[%d] Sending prompt...\n", index)
-
-	if err := sendPrompt(client, baseURL, session.ID, providerID, modelID, prompt); err != nil {
-		result.Error = fmt.Sprintf("Failed to send prompt: %v", err)
+		result.Error = fmt.Sprintf("Failed to run eval via Bun SDK: %v", err)
 		result.Duration = time.Since(startTime)
 		saveEvalResult(folderPath, result, modelStr)
 		return result
 	}
 
-	completed, errMsg := waitForCompletion(eventResp.Body, session.ID, index)
+	if sdkResult.SessionID != "" {
+		fmt.Printf("[%d] Session created: %s\n", index, sdkResult.SessionID)
+	}
 
 	result.Duration = time.Since(startTime)
+	if sdkResult.DurationMs > 0 {
+		result.Duration = time.Duration(sdkResult.DurationMs) * time.Millisecond
+	}
+
 	fmt.Printf("[%d] Completed in %ds\n", index, int(result.Duration.Seconds()))
 
-	result.Success = completed && errMsg == ""
-	if errMsg != "" {
-		result.Error = errMsg
-	} else if !completed {
+	result.AgentSuccess = sdkResult.Success && sdkResult.Error == ""
+	if sdkResult.Error != "" {
+		result.Error = sdkResult.Error
+	} else if !sdkResult.Success {
 		result.Error = "agent did not reach idle state"
 	}
+	result.Validation = validateEvalFolder(folderPath, result.Track)
+	if !result.Validation.ValidationSuccess() {
+		if result.Error == "" {
+			result.Error = strings.Join(result.Validation.Violations, "; ")
+		} else {
+			result.Error = fmt.Sprintf("%s | validation: %s", result.Error, strings.Join(result.Validation.Violations, "; "))
+		}
+	}
+	result.Success = result.AgentSuccess && result.Validation.ValidationSuccess()
 
 	saveEvalResult(folderPath, result, modelStr)
 	return result
-}
-
-func createSession(client *http.Client, baseURL, title string) (*Session, error) {
-	reqBody := map[string]string{"title": title}
-	body, _ := json.Marshal(reqBody)
-
-	resp, err := client.Post(baseURL+"/session", "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
-	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-
-	// Try direct format: {"id": "...", "title": "..."}
-	var session Session
-	if err := json.Unmarshal(respBody, &session); err != nil {
-		return nil, fmt.Errorf("parsing session response: %w", err)
-	}
-
-	if session.ID != "" {
-		return &session, nil
-	}
-
-	// Try data-wrapped format: {"data": {"id": "...", "title": "..."}}
-	var wrapped struct {
-		Data Session `json:"data"`
-	}
-	if err := json.Unmarshal(respBody, &wrapped); err == nil && wrapped.Data.ID != "" {
-		return &wrapped.Data, nil
-	}
-
-	return nil, fmt.Errorf("empty session ID in response: %s", string(respBody))
-}
-
-func sendPrompt(client *http.Client, baseURL, sessionID, providerID, modelID, prompt string) error {
-	reqBody := PromptRequest{
-		Model: Model{ProviderID: providerID, ModelID: modelID},
-		Parts: []PromptPart{{Type: "text", Text: prompt}},
-	}
-	body, _ := json.Marshal(reqBody)
-
-	// Use prompt_async endpoint — returns 204 immediately, agent runs in background
-	url := fmt.Sprintf("%s/session/%s/prompt_async", baseURL, sessionID)
-	req, _ := http.NewRequest("POST", url, strings.NewReader(string(body)))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-
-	return nil
-}
-
-func waitForCompletion(eventStream io.ReadCloser, sessionID string, index int) (bool, string) {
-	completed := false
-	var errorMsg string
-	lastActivity := time.Now()
-	stateMu := sync.Mutex{}
-
-	done := make(chan struct{})
-	var closeOnce sync.Once
-	closeDone := func() { closeOnce.Do(func() { close(done) }) }
-
-	go func() {
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				stateMu.Lock()
-				inactiveFor := time.Since(lastActivity)
-				alreadyFailed := errorMsg != ""
-				stateMu.Unlock()
-				if !alreadyFailed && inactiveFor > inactivityTimeout {
-					fmt.Printf("[%d] Timed out: no agent activity for %ds\n", index, int(inactivityTimeout.Seconds()))
-					stateMu.Lock()
-					errorMsg = fmt.Sprintf("no agent activity for %ds", int(inactivityTimeout.Seconds()))
-					stateMu.Unlock()
-					closeDone()
-					return
-				}
-			}
-		}
-	}()
-
-	scanner := bufio.NewScanner(eventStream)
-	scanner.Buffer(make([]byte, 64*1024), eventScannerMaxTokenSize)
-	for scanner.Scan() {
-		select {
-		case <-done:
-			stateMu.Lock()
-			doneCompleted := completed
-			doneErr := errorMsg
-			stateMu.Unlock()
-			return doneCompleted, doneErr
-		default:
-		}
-
-		line := scanner.Text()
-		if strings.TrimSpace(line) != "" {
-			stateMu.Lock()
-			lastActivity = time.Now()
-			stateMu.Unlock()
-		}
-
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-
-		data := strings.TrimPrefix(line, "data: ")
-
-		var event Event
-		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			continue
-		}
-
-		// Skip server-level events (heartbeats, etc.) — don't count as activity
-		if strings.HasPrefix(event.Type, "server.") {
-			continue
-		}
-
-		// Filter events by session ID
-		if eventSessionID, ok := event.Properties["sessionID"].(string); ok {
-			if eventSessionID != sessionID {
-				continue
-			}
-		}
-
-		switch event.Type {
-		case "session.idle":
-			fmt.Printf("[%d] Session idle - agent completed\n", index)
-			stateMu.Lock()
-			completed = true
-			stateMu.Unlock()
-			closeDone()
-			return true, ""
-
-		case "session.status":
-			// Newer event format: {sessionID, status: {type: "idle"|"busy"|"retry"}}
-			if status, ok := event.Properties["status"].(map[string]interface{}); ok {
-				if statusType, ok := status["type"].(string); ok {
-					switch statusType {
-					case "idle":
-						fmt.Printf("[%d] Session idle - agent completed\n", index)
-						stateMu.Lock()
-						completed = true
-						stateMu.Unlock()
-						closeDone()
-						return true, ""
-					case "busy":
-						fmt.Printf("[%d] Agent working...\n", index)
-					case "retry":
-						msg := ""
-						if m, ok := status["message"].(string); ok {
-							msg = m
-						}
-						fmt.Printf("[%d] Retrying: %s\n", index, msg)
-					}
-				}
-			}
-
-		case "session.error":
-			fmt.Printf("[%d] Session error detected\n", index)
-			stateMu.Lock()
-			if errVal, ok := event.Properties["error"]; ok {
-				errorMsg = extractErrorMessage(errVal)
-			} else {
-				errorMsg = "unknown session error"
-			}
-			stateMu.Unlock()
-			closeDone()
-			stateMu.Lock()
-			sessionErr := errorMsg
-			stateMu.Unlock()
-			return false, sessionErr
-
-		case "message.updated", "message.part.updated":
-			// Agent is actively generating — don't spam the log
-
-		default:
-			fmt.Printf("[%d] Event: %s\n", index, event.Type)
-		}
-	}
-
-	if err := scanner.Err(); err != nil && err != io.EOF {
-		fmt.Printf("[%d] Event stream error: %v\n", index, err)
-		stateMu.Lock()
-		if errorMsg == "" {
-			errorMsg = fmt.Sprintf("event stream error: %v", err)
-		}
-		stateMu.Unlock()
-	}
-
-	closeDone()
-	stateMu.Lock()
-	finalCompleted := completed
-	finalErr := errorMsg
-	stateMu.Unlock()
-	return finalCompleted, finalErr
 }
 
 func isTransientEvalError(errMsg string) bool {
@@ -2318,28 +2877,6 @@ func applyRuntimeOptions(timeoutSeconds, retries int) {
 	transientRetries = retries
 }
 
-func extractErrorMessage(errVal interface{}) string {
-	if errMap, ok := errVal.(map[string]interface{}); ok {
-		// Try nested: {data: {message: "..."}}
-		if data, ok := errMap["data"].(map[string]interface{}); ok {
-			if msg, ok := data["message"].(string); ok {
-				return msg
-			}
-		}
-		// Try flat: {message: "..."}
-		if msg, ok := errMap["message"].(string); ok {
-			return msg
-		}
-		if name, ok := errMap["name"].(string); ok {
-			return name
-		}
-	}
-	if s, ok := errVal.(string); ok {
-		return s
-	}
-	return fmt.Sprintf("%v", errVal)
-}
-
 func isModelNotFoundError(errMsg string) (bool, []string) {
 	if !strings.Contains(errMsg, "Model not found") {
 		return false, nil
@@ -2357,7 +2894,7 @@ func isModelNotFoundError(errMsg string) (bool, []string) {
 	return true, suggestions
 }
 
-func promptModelSelector(description string) (string, bool) {
+func promptModelSelector(description string, allowEmpty bool) (string, bool) {
 	savedModels, _ := loadSavedModels()
 
 	if len(savedModels) == 0 {
@@ -2382,7 +2919,10 @@ func promptModelSelector(description string) (string, bool) {
 	}
 
 	// Show saved models as a filterable select with custom option
-	options := make([]huh.Option[string], 0, len(savedModels)+1)
+	options := make([]huh.Option[string], 0, len(savedModels)+2)
+	if allowEmpty {
+		options = append(options, huh.NewOption("Keep stored model(s)", "__keep__"))
+	}
 	for _, m := range savedModels {
 		options = append(options, huh.NewOption(m, m))
 	}
@@ -2404,6 +2944,10 @@ func promptModelSelector(description string) (string, bool) {
 	}
 	if aborted {
 		return "", true
+	}
+
+	if selected == "__keep__" {
+		return "", false
 	}
 
 	if selected != "__custom__" {

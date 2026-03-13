@@ -1,30 +1,49 @@
 export type EvalResultFile = {
   prompt?: string;
+  prompt_id?: string;
+  prompt_title?: string;
   prompt_number?: number;
   model?: string;
+  track?: string;
   success?: boolean;
+  agent_success?: boolean;
+  validation_success?: boolean;
   error?: string;
   duration_seconds?: number;
   completed_at?: string;
   cost_usd?: number;
   cost?: number;
   total_cost?: number;
+  preview_mode?: string;
+  run_mode?: string;
+  violations?: string[];
+  checks?: Record<string, boolean>;
   [key: string]: unknown;
 };
 
 export type EvalRow = {
   folder: string;
   prompt: string;
+  promptID: string | null;
+  promptTitle: string | null;
   promptNumber: number | null;
   model: string;
+  track: string;
   success: boolean;
+  agentSuccess: boolean;
+  validationSuccess: boolean;
   durationSeconds: number;
   completedAt: string;
   completedAtEpoch: number;
   costUsd: number | null;
   error: string;
+  previewMode: "static" | "project_server" | "none";
+  runMode: ".run" | "uv" | "legacy" | "none";
   previewPath: string | null;
-  scriptPath: string | null;
+  violations: string[];
+  checks: Record<string, boolean>;
+  legacy: boolean;
+  headlineEligible: boolean;
 };
 
 export type ReportData = {
@@ -32,7 +51,13 @@ export type ReportData = {
   totalEvals: number;
   successfulEvals: number;
   failedEvals: number;
+  agentSuccessfulEvals: number;
+  validatedEvals: number;
   successRate: number;
+  validationRate: number;
+  headlineEvals: number;
+  headlineSuccessfulEvals: number;
+  headlineSuccessRate: number;
   totalDurationSeconds: number;
   averageDurationSeconds: number;
   totalKnownCostUsd: number;

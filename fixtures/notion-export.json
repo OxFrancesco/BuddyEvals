@@ -1,0 +1,37 @@
+[
+  {
+    "Name": "Launch landing page",
+    "Status": "In progress",
+    "Owner": "Frances",
+    "Estimate": "3 days",
+    "Shipped At": "",
+    "Priority": "P1"
+  },
+  {
+    "Name": "Fix mobile navbar overflow",
+    "Status": "done",
+    "Owner": "Kai",
+    "Estimate": 4,
+    "Shipped At": "2026-03-07",
+    "Priority": "high"
+  },
+  {
+    "Name": "Customer interview notes",
+    "Status": "Blocked",
+    "Owner": [
+      "Mina",
+      "Frances"
+    ],
+    "Estimate": "n/a",
+    "Shipped At": null,
+    "Priority": "P2"
+  },
+  {
+    "Name": "Refactor billing copy",
+    "Status": "In Progress",
+    "Owner": "mina",
+    "Estimate": "2.5",
+    "Shipped At": "",
+    "Priority": "medium"
+  }
+]

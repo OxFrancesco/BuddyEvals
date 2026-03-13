@@ -1,0 +1,37 @@
+[
+  {
+    "sha": "9f12c0a",
+    "date": "2026-03-02",
+    "author": "Frances",
+    "repo": "high-evals",
+    "summary": "Added .run-aware runtime detection and preview metadata."
+  },
+  {
+    "sha": "6aa4d10",
+    "date": "2026-03-03",
+    "author": "Mina",
+    "repo": "high-evals",
+    "summary": "Reworked prompts into a structured manifest with track metadata."
+  },
+  {
+    "sha": "d72ba88",
+    "date": "2026-03-04",
+    "author": "Kai",
+    "repo": "dashboard",
+    "summary": "Improved table sorting, tooltips, and inline status visibility."
+  },
+  {
+    "sha": "14b9fd7",
+    "date": "2026-03-05",
+    "author": "Frances",
+    "repo": "dashboard",
+    "summary": "Fixed broken asset references in the pokemon and founder-match eval outputs."
+  },
+  {
+    "sha": "83ce51f",
+    "date": "2026-03-07",
+    "author": "Mina",
+    "repo": "mobile-track",
+    "summary": "Split Expo prompts out of the headline deterministic suite."
+  }
+]

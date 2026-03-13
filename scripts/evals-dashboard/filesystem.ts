@@ -163,8 +163,7 @@ export async function findRunnablePythonFiles(folderPath: string, maxDepth = 5):
 
   async function inspectFile(fullPath: string): Promise<void> {
     const relativePath = fullPath.slice(folderPath.length + 1);
-    const parts = relativePath.split("/");
-    const baseName = parts.length > 0 ? parts[parts.length - 1] : "";
+    const baseName = relativePath.split("/").at(-1) ?? "";
     if (
       !relativePath.endsWith(".py")
       || baseName === "__init__.py"

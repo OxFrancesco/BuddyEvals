@@ -1,0 +1,23 @@
+{
+  "name": "Frances O.",
+  "headline": "Product-minded engineer building polished developer tools",
+  "location": "San Francisco, CA",
+  "links": [
+    {
+      "label": "GitHub",
+      "href": "https://github.com/franceso"
+    },
+    {
+      "label": "X / Twitter",
+      "href": "https://x.com/franceso"
+    },
+    {
+      "label": "Blog",
+      "href": "https://frances.dev/blog"
+    },
+    {
+      "label": "Schedule a Call",
+      "href": "https://cal.com/franceso"
+    }
+  ]
+}

@@ -1,7 +1,8 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 
-import { findIndexHtml, findScript } from "./filesystem.ts";
+import { analyzeLegacyFolder, normalizeTrack, type DashboardPreviewMode, type DashboardRunMode } from "./contracts.ts";
+import { findIndexHtml } from "./filesystem.ts";
 import { parsePositiveInt, parsePositiveNumber } from "./parsing.ts";
 import type { EvalResultFile, EvalRow, ReportData } from "./types.ts";
 
@@ -37,19 +38,43 @@ export async function collectReportData(evalsDir: string, promptsPath: string): 
 
     const completedAt = typeof parsed.completed_at === "string" ? parsed.completed_at : "";
     const completedAtEpoch = completedAt ? Date.parse(completedAt) : Number.NaN;
-
+    const prompt = typeof parsed.prompt === "string" && parsed.prompt.trim() !== "" ? parsed.prompt : promptText;
+    const track = normalizeTrack(typeof parsed.track === "string" ? parsed.track : undefined, prompt);
     const promptNumber = inferPromptNumber(folder, parsed.prompt_number, parsed.prompt, promptText, promptNumberByText);
-
     const folderFullPath = join(evalsDir, folder);
-    const previewPath = await findIndexHtml(folderFullPath);
-    const scriptPath = await findScript(folderFullPath);
+    const legacy = typeof parsed.validation_success !== "boolean" || typeof parsed.agent_success !== "boolean";
+    const legacyAnalysis = legacy ? await analyzeLegacyFolder(folderFullPath, parsed.track, prompt) : null;
+
+    const previewMode = normalizePreviewMode(parsed.preview_mode) ?? legacyAnalysis?.previewMode ?? "none";
+    const runMode = normalizeRunMode(parsed.run_mode) ?? legacyAnalysis?.runMode ?? "none";
+    const violations = Array.isArray(parsed.violations)
+      ? parsed.violations.filter((value): value is string => typeof value === "string" && value.trim() !== "")
+      : legacyAnalysis?.violations ?? [];
+    const checks = parsed.checks && typeof parsed.checks === "object"
+      ? parsed.checks as Record<string, boolean>
+      : {};
+
+    const agentSuccess = typeof parsed.agent_success === "boolean" ? parsed.agent_success : parsed.success === true;
+    const validationSuccess = typeof parsed.validation_success === "boolean"
+      ? parsed.validation_success
+      : violations.length === 0;
+    const success = agentSuccess && validationSuccess;
+    const previewPath = previewMode === "none"
+      ? null
+      : (await findIndexHtml(folderFullPath)) ? `/preview/${folder}/` : `/preview/${folder}/`;
+    const headlineEligible = track !== "integration" && track !== "mobile";
 
     rows.push({
       folder,
-      prompt: typeof parsed.prompt === "string" && parsed.prompt.trim() !== "" ? parsed.prompt : promptText,
+      prompt,
+      promptID: typeof parsed.prompt_id === "string" && parsed.prompt_id.trim() !== "" ? parsed.prompt_id : null,
+      promptTitle: typeof parsed.prompt_title === "string" && parsed.prompt_title.trim() !== "" ? parsed.prompt_title : null,
       promptNumber,
       model: typeof parsed.model === "string" ? parsed.model : "unknown",
-      success: parsed.success === true,
+      track,
+      success,
+      agentSuccess,
+      validationSuccess,
       durationSeconds: Number.isFinite(parsed.duration_seconds)
         ? Math.max(0, Number(parsed.duration_seconds))
         : 0,
@@ -57,8 +82,13 @@ export async function collectReportData(evalsDir: string, promptsPath: string): 
       completedAtEpoch,
       costUsd: extractCostUsd(parsed),
       error: typeof parsed.error === "string" ? parsed.error : "",
+      previewMode,
+      runMode,
       previewPath,
-      scriptPath,
+      violations,
+      checks,
+      legacy,
+      headlineEligible,
     });
   }
 
@@ -80,18 +110,29 @@ export async function collectReportData(evalsDir: string, promptsPath: string): 
   const totalEvals = rows.length;
   const successfulEvals = rows.filter((row) => row.success).length;
   const failedEvals = totalEvals - successfulEvals;
+  const agentSuccessfulEvals = rows.filter((row) => row.agentSuccess).length;
+  const validatedEvals = rows.filter((row) => row.validationSuccess).length;
   const totalDurationSeconds = rows.reduce((sum, row) => sum + row.durationSeconds, 0);
   const averageDurationSeconds = totalEvals > 0 ? totalDurationSeconds / totalEvals : 0;
 
   const knownCostRows = rows.filter((row) => row.costUsd !== null);
   const totalKnownCostUsd = knownCostRows.reduce((sum, row) => sum + (row.costUsd ?? 0), 0);
 
+  const headlineRows = rows.filter((row) => row.headlineEligible);
+  const headlineSuccessfulEvals = headlineRows.filter((row) => row.success).length;
+
   return {
     rows,
     totalEvals,
     successfulEvals,
     failedEvals,
+    agentSuccessfulEvals,
+    validatedEvals,
     successRate: totalEvals > 0 ? (successfulEvals / totalEvals) * 100 : 0,
+    validationRate: totalEvals > 0 ? (validatedEvals / totalEvals) * 100 : 0,
+    headlineEvals: headlineRows.length,
+    headlineSuccessfulEvals,
+    headlineSuccessRate: headlineRows.length > 0 ? (headlineSuccessfulEvals / headlineRows.length) * 100 : 0,
     totalDurationSeconds,
     averageDurationSeconds,
     totalKnownCostUsd,
@@ -120,11 +161,18 @@ async function loadPromptNumberLookup(promptsPath: string): Promise<Map<string, 
 
   for (let i = 0; i < prompts.length; i += 1) {
     const prompt = prompts[i];
-    if (typeof prompt !== "string") {
+    if (typeof prompt === "string") {
+      if (!lookup.has(prompt)) {
+        lookup.set(prompt, i + 1);
+      }
       continue;
     }
-    if (!lookup.has(prompt)) {
-      lookup.set(prompt, i + 1);
+
+    if (prompt && typeof prompt === "object" && typeof (prompt as { prompt?: unknown }).prompt === "string") {
+      const promptText = (prompt as { prompt: string }).prompt;
+      if (!lookup.has(promptText)) {
+        lookup.set(promptText, i + 1);
+      }
     }
   }
 
@@ -144,8 +192,9 @@ function inferPromptNumber(
   }
 
   const folderMatch = folder.match(/(?:^|_)p(\d+)(?:_|$)/);
-  if (folderMatch) {
-    const folderNum = Number.parseInt(folderMatch[1], 10);
+  const folderValue = folderMatch?.[1];
+  if (folderValue) {
+    const folderNum = Number.parseInt(folderValue, 10);
     if (Number.isInteger(folderNum) && folderNum > 0) {
       return folderNum;
     }
@@ -179,5 +228,19 @@ function extractCostUsd(result: EvalResultFile): number | null {
     }
   }
 
+  return null;
+}
+
+function normalizePreviewMode(value: unknown): DashboardPreviewMode | null {
+  if (value === "static" || value === "project_server" || value === "none") {
+    return value;
+  }
+  return null;
+}
+
+function normalizeRunMode(value: unknown): DashboardRunMode | null {
+  if (value === ".run" || value === "uv" || value === "legacy" || value === "none") {
+    return value;
+  }
   return null;
 }
