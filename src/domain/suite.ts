@@ -84,6 +84,12 @@ export type ResolvedPromptCase = {
   format?: OutputFormat
 }
 
+export type InvalidResolvedModel = {
+  model: string
+  source: string
+  caseIds: Array<string>
+}
+
 const DEFAULT_TIMEOUT_MS = 300_000
 
 export function parsePromptSuite(input: string): PromptSuite {
@@ -152,6 +158,55 @@ export function buildCaseWorkspaceDirectory(input: {
     makePathSegment(input.caseId),
     makePathSegment(input.model),
   )
+}
+
+export function resolveModelConfigSource(suite: PromptSuite, caseId: string): string {
+  const index = suite.cases.findIndex((item) => item.id === caseId)
+  const caseItem = index >= 0 ? suite.cases[index] : undefined
+
+  if (caseItem?.model) {
+    return `buddyevals.suite.json cases[${index}].model`
+  }
+
+  if (suite.defaults?.model) {
+    return "buddyevals.suite.json defaults.model"
+  }
+
+  return `resolved case "${caseId}"`
+}
+
+export function collectInvalidResolvedModels(
+  suite: PromptSuite,
+  resolvedCases: ReadonlyArray<ResolvedPromptCase>,
+  availableModels: Iterable<string>,
+): Array<InvalidResolvedModel> {
+  const known = new Set<string>()
+  for (const value of availableModels) {
+    known.add(value)
+    known.add(value.replace(/^openrouter\//, ""))
+  }
+
+  const invalid = new Map<string, InvalidResolvedModel>()
+  for (const item of resolvedCases) {
+    const candidates = [item.model, item.model.replace(/^openrouter\//, "")]
+    if (candidates.some((candidate) => known.has(candidate))) {
+      continue
+    }
+
+    const current = invalid.get(item.model)
+    if (current) {
+      current.caseIds.push(item.id)
+      continue
+    }
+
+    invalid.set(item.model, {
+      model: item.model,
+      source: resolveModelConfigSource(suite, item.id),
+      caseIds: [item.id],
+    })
+  }
+
+  return [...invalid.values()]
 }
 
 export function upsertSuiteCase(

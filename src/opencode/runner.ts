@@ -5,7 +5,7 @@ import type { GlobalConfig } from "@/config/global-config"
 import { deriveCaseOutcome, eventSessionId, normalizeError, toAssistantMessage, type CaseStatus, type NormalizedError } from "@/domain/outcome"
 import type { ResolvedPromptCase } from "@/domain/suite"
 
-export type RunnerClient = Pick<OpencodeClient, "global" | "session">
+export type RunnerClient = Pick<OpencodeClient, "global" | "session" | "config">
 
 export type CaseRunResult = {
   sessionId?: string

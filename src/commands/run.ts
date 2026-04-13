@@ -7,8 +7,8 @@ import path from "node:path"
 import { ensureWorkspaceState, loadSuite, resolveSuitePath } from "@/commands/shared"
 import { readEffectiveConfig, resolveOpenRouterApiKey } from "@/config/global-config"
 import type { CaseStatus } from "@/domain/outcome"
-import { buildCaseWorkspaceDirectory, resolvePromptCase } from "@/domain/suite"
-import { OpenCodeRunner, runPromptCase, type CaseRunProgress } from "@/opencode/runner"
+import { buildCaseWorkspaceDirectory, collectInvalidResolvedModels, resolvePromptCase, type PromptSuite, type ResolvedPromptCase } from "@/domain/suite"
+import { OpenCodeRunner, runPromptCase, type CaseRunProgress, type RunnerClient } from "@/opencode/runner"
 import { writeCaseArtifacts } from "@/storage/artifacts"
 import { Repository, buildCaseRunRecord } from "@/storage/repository"
 import { runDashboard } from "@/tui/dashboard"
@@ -60,6 +60,32 @@ function formatProgress(caseId: string, progress: CaseRunProgress): string | und
   }
 
   return undefined
+}
+
+async function validateResolvedCaseModels(
+  client: RunnerClient,
+  suite: PromptSuite,
+  resolvedCases: ReadonlyArray<ResolvedPromptCase>,
+): Promise<void> {
+  const result = await client.config.providers(undefined, { throwOnError: true })
+  const provider = result.data?.providers.find((item: { id: string; models: Record<string, unknown> }) => item.id === "openrouter")
+  if (!provider) return
+
+  const invalid = collectInvalidResolvedModels(suite, resolvedCases, Object.keys(provider.models))
+  if (invalid.length === 0) return
+
+  const details = invalid
+    .map((item) => `- ${item.model} from ${item.source} (cases: ${item.caseIds.join(", ")})`)
+    .join("\n")
+
+  throw new Error(
+    [
+      'Invalid model configuration for provider "openrouter".',
+      "These model IDs are not available in the current OpenCode provider config:",
+      details,
+      'Update "buddyevals.suite.json" to a valid model ID and rerun.',
+    ].join("\n"),
+  )
 }
 
 export const runCommand = Command.make(
@@ -126,6 +152,7 @@ export const runCommand = Command.make(
             config: globalConfig,
           },
           async (client) => {
+            await validateResolvedCaseModels(client, parsedSuite, resolvedCases)
             await Effect.runPromise(
               Effect.forEach(
                 resolvedCases,

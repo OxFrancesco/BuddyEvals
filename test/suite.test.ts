@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
-import { buildCaseWorkspaceDirectory, collectModelSuggestions, makeCaseId, parsePromptSuite, resolvePromptCase, removeSuiteCase, upsertSuiteCase } from "@/domain/suite"
+import { buildCaseWorkspaceDirectory, collectInvalidResolvedModels, collectModelSuggestions, makeCaseId, parsePromptSuite, resolvePromptCase, removeSuiteCase, upsertSuiteCase } from "@/domain/suite"
 
 const suite = parsePromptSuite(
   JSON.stringify({
@@ -98,5 +98,53 @@ describe("suite domain", () => {
     })
 
     expect(result).toBe("/tmp/project/outputs/my-case/anthropic-claude-sonnet-4")
+  })
+
+  it("reports invalid resolved models with the originating suite field", () => {
+    const invalid = collectInvalidResolvedModels(
+      suite,
+      [
+        resolvePromptCase(
+          suite,
+          suite.cases[0]!,
+          {
+            defaultAgent: "planner",
+            defaultDirectory: "/tmp/project",
+          },
+          "/tmp/fallback",
+        ),
+      ],
+      ["openai/gpt-4.1-mini", "google/gemini-2.5-flash"],
+    )
+
+    expect(invalid).toEqual([])
+
+    const brokenSuite = parsePromptSuite(
+      JSON.stringify({
+        version: 1,
+        provider: "openrouter",
+        defaults: {
+          model: "elephant-alpha",
+        },
+        cases: [
+          {
+            id: "broken",
+            title: "Broken",
+            prompt: "Hello",
+          },
+        ],
+      }),
+    )
+
+    const brokenResolved = resolvePromptCase(brokenSuite, brokenSuite.cases[0]!, {}, "/tmp/fallback")
+    expect(
+      collectInvalidResolvedModels(brokenSuite, [brokenResolved], ["openai/gpt-4.1-mini"]),
+    ).toEqual([
+      {
+        model: "elephant-alpha",
+        source: "buddyevals.suite.json defaults.model",
+        caseIds: ["broken"],
+      },
+    ])
   })
 })
